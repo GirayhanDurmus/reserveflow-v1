@@ -68,6 +68,7 @@ func HasActiveReservationConflict(resourceID uint, startTime time.Time, endTime 
 
 	return count > 0, nil
 }
+<<<<<<< HEAD
 func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*models.WorkingHour, error) {
 	var workingHour models.WorkingHour
 
@@ -82,3 +83,5 @@ func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*model
 
 	return &workingHour, nil
 }
+=======
+>>>>>>> 9d5ac127c0fd3b5689c141f3c90aa952448ce523
