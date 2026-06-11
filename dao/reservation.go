@@ -68,7 +68,7 @@ func HasActiveReservationConflict(resourceID uint, startTime time.Time, endTime 
 
 	return count > 0, nil
 }
-<<<<<<< HEAD
+
 func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*models.WorkingHour, error) {
 	var workingHour models.WorkingHour
 
@@ -83,5 +83,26 @@ func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*model
 
 	return &workingHour, nil
 }
-=======
->>>>>>> 9d5ac127c0fd3b5689c141f3c90aa952448ce523
+func HasActiveReservationConflictExceptID(reservationID uint, resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
+	var count int64
+
+	now := time.Now()
+
+	err := commons.DB.Model(&models.Reservation{}).
+		Where("id <> ?", reservationID).
+		Where("resource_id = ?", resourceID).
+		Where("start_time < ? AND end_time > ?", endTime, startTime).
+		Where(
+			"status = ? OR (status = ? AND expires_at > ?)",
+			models.ReservationStatusConfirmed,
+			models.ReservationStatusHeld,
+			now,
+		).
+		Count(&count).Error
+
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}

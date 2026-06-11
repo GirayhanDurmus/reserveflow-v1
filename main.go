@@ -15,7 +15,7 @@ func main() {
 	commons.LoadConfig()
 	commons.ConnectPostgres()
 
-	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}); err != nil {
+	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.Reservation{}); err != nil {
 		panic(err)
 	}
 
@@ -42,6 +42,12 @@ func main() {
 
 	admin.POST("/resources/:id/working-hours", api.SetWorkingHours)
 	admin.GET("/resources/:id/working-hours", api.GetWorkingHours)
+
+	reservation := r.Group("/reservations")
+	reservation.Use(middleware.AuthRequired())
+	reservation.POST("/hold", api.HoldReservation)
+	reservation.POST("/:id/confirm", api.ConfirmReservation)
+	reservation.GET("/my", api.GetMyReservations)
 
 	port := commons.AppConfig.AppPort
 
