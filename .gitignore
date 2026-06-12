@@ -1,1 +1,18 @@
+# Environment files
 .env
+
+# Go build outputs
+*.exe
+*.test
+*.out
+
+# Go workspace
+go.work
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
