@@ -47,6 +47,7 @@ func main() {
 	reservation.Use(middleware.AuthRequired())
 	reservation.POST("/hold", api.HoldReservation)
 	reservation.POST("/:id/confirm", api.ConfirmReservation)
+	reservation.POST("/:id/canceled", api.CancelReservation)
 	reservation.GET("/my", api.GetMyReservations)
 
 	port := commons.AppConfig.AppPort
