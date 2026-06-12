@@ -319,6 +319,116 @@ func ConfirmReservation(c *gin.Context) {
 		"data":    confirmedReservation,
 	})
 }
+
+func CancelReservation(c *gin.Context) {
+	userID, ok := getCurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESERVATION_ID",
+				"message": "reservation id is invalid",
+			},
+		})
+		return
+	}
+
+	reservation, err := dao.GetReservationByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_NOT_FOUND",
+				"message": "reservation not found",
+			},
+		})
+		return
+	}
+
+	if reservation.UserID != userID {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "NOT_YOUR_RESERVATION",
+				"message": "you can only cancel your own reservation",
+			},
+		})
+		return
+	}
+
+	if reservation.Status == models.ReservationStatusCancelled {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "ALREADY_CANCELLED",
+				"message": "reservation already cancelled",
+			},
+		})
+		return
+	}
+
+	if reservation.Status == models.ReservationStatusExpired {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_EXPIRED",
+				"message": "expired reservation cannot be cancelled",
+			},
+		})
+		return
+	}
+
+	if reservation.Status == models.ReservationStatusHeld && time.Now().After(reservation.ExpiresAt) {
+		reservation.Status = models.ReservationStatusExpired
+		_ = dao.UpdateReservation(reservation)
+
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_EXPIRED",
+				"message": "reservation hold has expired",
+			},
+		})
+		return
+	}
+
+	reservation.Status = models.ReservationStatusCancelled
+
+	if err := dao.UpdateReservation(reservation); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_CANCEL_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	cancelledReservation, err := dao.GetReservationByID(reservation.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_DETAIL_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    cancelledReservation,
+	})
+}
 func getCurrentUserID(c *gin.Context) (uint, bool) {
 	userIDValue, exists := c.Get("user_id")
 	if !exists {
