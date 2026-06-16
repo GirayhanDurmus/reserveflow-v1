@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: reserveflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: reserveflow_v1
+    ports:
+      - "5434:5432"
+    volumes:
+      - reserveflow_postgres_data:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: reserveflow-api
+    restart: unless-stopped
+    environment:
+      APP_NAME: reserveflow-v1
+      APP_ENV: development
+      APP_PORT: 8083
+
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: reserveflow_v1
+      POSTGRES_SSLMODE: disable
+
+      JWT_SECRET: change-this-secret
+      JWT_ACCESS_TTL_MINUTES: 15
+    ports:
+      - "8083:8083"
+    depends_on:
+      - postgres
+
+volumes:
+  reserveflow_postgres_data:
