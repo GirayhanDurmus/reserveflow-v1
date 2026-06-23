@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reserveflow-v1/middleware"
 	"strconv"
 
 	"reserveflow-v1/dao"
@@ -21,7 +22,7 @@ type SetWorkingHoursRequest struct {
 	WorkingHours []WorkingHourItemRequest `json:"working_hours"`
 }
 
-func SetWorkingHours(c *gin.Context) {
+func CreateWorkingHours(c *gin.Context) {
 	id := c.Param("id")
 
 	id64, err := strconv.ParseUint(id, 10, 64)
@@ -138,4 +139,12 @@ func GetWorkingHours(c *gin.Context) {
 		"success": true,
 		"data":    workingHours,
 	})
+}
+func AddWorkingHoursURLs(r *gin.RouterGroup) {
+	wh := r.Group("/admin/resources/:id/working-hours")
+	wh.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+
+	wh.POST("", CreateWorkingHours)
+	wh.GET("", GetWorkingHours)
+
 }

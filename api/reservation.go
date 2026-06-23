@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reserveflow-v1/middleware"
 	"strconv"
 	"time"
 
@@ -521,4 +522,14 @@ func clockToMinutes(value string) (int, error) {
 	}
 
 	return parsedTime.Hour()*60 + parsedTime.Minute(), nil
+}
+
+func AddReservationURLs(r *gin.RouterGroup) {
+	reservation := r.Group("/reservation")
+	reservation.Use(middleware.AuthRequired())
+	reservation.POST("/hold", HoldReservation)
+	reservation.GET("/my", GetMyReservations)
+	reservation.POST("/:id/confirm", ConfirmReservation)
+	reservation.POST("/:id/cancel", CancelReservation)
+
 }

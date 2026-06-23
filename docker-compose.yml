@@ -11,6 +11,11 @@ services:
       - "5434:5432"
     volumes:
       - reserveflow_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+          test: [ "CMD-SHELL", "pg_isready -U postgres -d reserveflow_v1" ]
+          interval: 5s
+          timeout: 5s
+          retries: 5
 
   api:
     build:
@@ -35,7 +40,8 @@ services:
     ports:
       - "8083:8083"
     depends_on:
-      - postgres
+       postgres:
+          condition: service_healthy
 
 volumes:
   reserveflow_postgres_data:

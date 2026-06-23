@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"reserveflow-v1/middleware"
 	"strconv"
 	"time"
 
@@ -222,4 +223,15 @@ func GenerateToken(user *models.User) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	return token.SignedString([]byte(commons.AppConfig.JWTSecret))
+}
+
+func AddAuthURLs(r *gin.RouterGroup) {
+	auth := r.Group("/auth")
+
+	auth.POST("/register", Register)
+	auth.POST("/login", Login)
+
+	protected := auth.Group("/")
+	protected.Use(middleware.AuthRequired())
+	protected.GET("/me", Me)
 }

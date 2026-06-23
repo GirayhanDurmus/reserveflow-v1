@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reserveflow-v1/middleware"
 	"strconv"
 
 	"reserveflow-v1/dao"
@@ -203,4 +204,17 @@ func DeleteResource(c *gin.Context) {
 			"message": "resource deleted",
 		},
 	})
+}
+func AddResourceURLs(r *gin.RouterGroup) {
+	resources := r.Group("/resources")
+
+	resources.GET("", GetAllResources)
+	resources.GET("/:id", GetResourceByID)
+
+	adminResources := r.Group("/admin/resources")
+	adminResources.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+
+	adminResources.POST("", CreateResource)
+	adminResources.PATCH("/:id", UpdateResource)
+	adminResources.DELETE("/:id", DeleteResource)
 }

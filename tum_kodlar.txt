@@ -1,0 +1,1727 @@
+﻿package main
+
+import (
+	"fmt"
+
+	"reserveflow-v1/api"
+	"reserveflow-v1/commons"
+	"reserveflow-v1/middleware"
+	"reserveflow-v1/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	commons.LoadConfig()
+	commons.ConnectPostgres()
+
+	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}); err != nil {
+		panic(err)
+	}
+
+	r := gin.Default()
+
+	r.GET("/health", api.Health)
+
+	r.POST("/auth/register", api.Register)
+	r.POST("/auth/login", api.Login)
+
+	auth := r.Group("/auth")
+	auth.Use(middleware.AuthRequired())
+	auth.GET("/me", api.Me)
+
+	admin := r.Group("/admin")
+	admin.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+	admin.GET("/ping", api.AdminPing)
+	admin.POST("/resources", api.CreateResource)
+	admin.PATCH("/resources/:id", api.UpdateResource)
+	admin.DELETE("/resources/:id", api.DeleteResource)
+
+	admin.POST("/resources/:id/working-hours", api.CreateWorkingHours)
+	admin.GET("/resources/:id/working-hours", api.GetWorkingHours)
+
+	api.AddReservationURL(r)
+
+	port := commons.AppConfig.AppPort
+
+	fmt.Println("Server running on port:", port)
+
+	if err := r.Run(":" + port); err != nil {
+		panic(err)
+	}
+}
+package api
+
+import (
+	"net/http"
+	"reserveflow-v1/middleware"
+	"strconv"
+
+	"reserveflow-v1/dao"
+	"reserveflow-v1/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+type WorkingHourItemRequest struct {
+	DayOfWeek string `json:"day_of_week"`
+	OpenTime  string `json:"open_time"`
+	CloseTime string `json:"close_time"`
+	IsClosed  bool   `json:"is_closed"`
+}
+
+type SetWorkingHoursRequest struct {
+	WorkingHours []WorkingHourItemRequest `json:"working_hours"`
+}
+
+func CreateWorkingHours(c *gin.Context) {
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	resource, err := dao.GetResourceByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_NOT_FOUND",
+				"message": "resource not found",
+			},
+		})
+		return
+	}
+
+	var req SetWorkingHoursRequest
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	if err := dao.DeleteWorkingHoursByResourceID(resource.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "WORKING_HOURS_DELETE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	var createdWorkingHours []models.WorkingHour
+
+	for _, item := range req.WorkingHours {
+		workingHour := models.WorkingHour{
+			ResourceID: resource.ID,
+			DayOfWeek:  item.DayOfWeek,
+			OpenTime:   item.OpenTime,
+			CloseTime:  item.CloseTime,
+			IsClosed:   item.IsClosed,
+		}
+
+		if err := dao.CreateWorkingHour(&workingHour); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "WORKING_HOUR_CREATE_ERROR",
+					"message": err.Error(),
+				},
+			})
+			return
+		}
+
+		createdWorkingHours = append(createdWorkingHours, workingHour)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    createdWorkingHours,
+	})
+}
+
+func GetWorkingHours(c *gin.Context) {
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	resource, err := dao.GetResourceByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_NOT_FOUND",
+				"message": "resource not found",
+			},
+		})
+		return
+	}
+
+	workingHours, err := dao.GetWorkingHoursByResourceID(resource.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "WORKING_HOURS_LIST_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    workingHours,
+	})
+}
+func AddWorkingHoursURL(r *gin.RouterGroup) {
+	wh := r.Group("resources/:id/working_hours")
+	wh.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+
+	wh.POST("", CreateWorkingHours)
+	wh.GET("", GetWorkingHours)
+
+}
+package api
+
+import (
+	"errors"
+	"net/http"
+	"reserveflow-v1/middleware"
+	"strconv"
+	"time"
+
+	"reserveflow-v1/commons"
+	"reserveflow-v1/dao"
+	"reserveflow-v1/models"
+
+	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+)
+
+type RegisterRequest struct {
+	FullName string `json:"full_name"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func Register(c *gin.Context) {
+	var req RegisterRequest
+
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	existingUser, err := dao.GetUserByEmail(req.Email)
+	if err == nil && existingUser != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "EMAIL_ALREADY_EXISTS",
+				"message": "email already registered",
+			},
+		})
+		return
+	}
+
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "DATABASE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "PASSWORD_HASH_ERROR",
+				"message": "password could not be hashed",
+			},
+		})
+		return
+	}
+
+	user := models.User{
+		FullName:     req.FullName,
+		Email:        req.Email,
+		PasswordHash: string(passwordHash),
+		Role:         models.UserRoleUser,
+	}
+
+	if err := dao.CreateUser(&user); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "USER_CREATE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"id":         user.ID,
+			"full_name":  user.FullName,
+			"email":      user.Email,
+			"role":       user.Role,
+			"created_at": user.CreatedAt,
+		},
+	})
+}
+
+func Login(c *gin.Context) {
+	var req LoginRequest
+
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	user, err := dao.GetUserByEmail(req.Email)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_CREDENTIALS",
+				"message": "email or password is wrong",
+			},
+		})
+		return
+	}
+
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_CREDENTIALS",
+				"message": "email or password is wrong",
+			},
+		})
+		return
+	}
+
+	token, err := GenerateToken(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "TOKEN_CREATE_ERROR",
+				"message": "token could not be created",
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"id":         user.ID,
+			"full_name":  user.FullName,
+			"email":      user.Email,
+			"role":       user.Role,
+			"created_at": user.CreatedAt,
+			"token":      token,
+		},
+	})
+}
+
+func Me(c *gin.Context) {
+	userIDValue, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "USER_ID_NOT_FOUND",
+				"message": "user id not found",
+			},
+		})
+		return
+	}
+
+	userID, ok := userIDValue.(uint)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_USER_ID",
+				"message": "user id is invalid",
+			},
+		})
+		return
+	}
+
+	user, err := dao.GetUserByID(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "USER_NOT_FOUND",
+				"message": "user not found",
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"id":         user.ID,
+			"full_name":  user.FullName,
+			"email":      user.Email,
+			"role":       user.Role,
+			"created_at": user.CreatedAt,
+		},
+	})
+}
+
+func GenerateToken(user *models.User) (string, error) {
+	ttlMinutes, err := strconv.Atoi(commons.AppConfig.JWTAccessTTLMinutes)
+	if err != nil {
+		ttlMinutes = 15
+	}
+
+	claims := jwt.MapClaims{
+		"user_id": user.ID,
+		"email":   user.Email,
+		"role":    user.Role,
+		"exp":     time.Now().Add(time.Duration(ttlMinutes) * time.Minute).Unix(),
+		"iat":     time.Now().Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	return token.SignedString([]byte(commons.AppConfig.JWTSecret))
+}
+
+func AddAuthURLs(r *gin.RouterGroup) {
+	auth := r.Group("/auth")
+
+	auth.POST("/register", Register)
+	auth.POST("/login", Login)
+
+	protected := auth.Group("/")
+	protected.Use(middleware.AuthRequired())
+	protected.GET("/me", Me)
+}
+package api
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+func Health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"status": "ok",
+			"app":    "reserveflow-v1",
+		},
+	})
+}
+
+func AdminPing(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"message": "admin access granted",
+		},
+	})
+}
+package api
+
+import (
+	"net/http"
+	"reserveflow-v1/middleware"
+	"strconv"
+	"time"
+
+	"reserveflow-v1/dao"
+	"reserveflow-v1/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+type HoldReservationRequest struct {
+	ResourceID uint   `json:"resource_id"`
+	StartTime  string `json:"start_time"`
+	EndTime    string `json:"end_time"`
+}
+
+func HoldReservation(c *gin.Context) {
+	userID, ok := getCurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	var req HoldReservationRequest
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	startTime, err := time.Parse(time.RFC3339, req.StartTime)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_START_TIME",
+				"message": "start_time must be RFC3339 format",
+			},
+		})
+		return
+	}
+
+	endTime, err := time.Parse(time.RFC3339, req.EndTime)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_END_TIME",
+				"message": "end_time must be RFC3339 format",
+			},
+		})
+		return
+	}
+
+	if !endTime.After(startTime) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_TIME_RANGE",
+				"message": "end_time must be after start_time",
+			},
+		})
+		return
+	}
+
+	resource, err := dao.GetResourceByID(req.ResourceID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_NOT_FOUND",
+				"message": "resource not found",
+			},
+		})
+		return
+	}
+
+	if !resource.IsActive {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_INACTIVE",
+				"message": "resource is inactive",
+			},
+		})
+		return
+	}
+
+	withinWorkingHours, err := isWithinResourceWorkingHours(resource.ID, startTime, endTime)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "WORKING_HOURS_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	if !withinWorkingHours {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "OUTSIDE_WORKING_HOURS",
+				"message": "reservation time is outside resource working hours",
+			},
+		})
+		return
+	}
+
+	hasConflict, err := dao.HasActiveReservationConflict(resource.ID, startTime, endTime)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "CONFLICT_CHECK_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	if hasConflict {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_CONFLICT",
+				"message": "resource is already reserved or held for this time range",
+			},
+		})
+		return
+	}
+
+	reservation := models.Reservation{
+		UserID:     userID,
+		ResourceID: resource.ID,
+		StartTime:  startTime,
+		EndTime:    endTime,
+		Status:     models.ReservationStatusHeld,
+		ExpiresAt:  time.Now().Add(10 * time.Minute),
+	}
+
+	if err := dao.CreateReservation(&reservation); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_HOLD_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	createdReservation, err := dao.GetReservationByID(reservation.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_DETAIL_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    createdReservation,
+	})
+}
+
+func GetMyReservations(c *gin.Context) {
+	userID, ok := getCurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	reservations, err := dao.GetReservationsByUserID(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATIONS_LIST_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    reservations,
+	})
+}
+func ConfirmReservation(c *gin.Context) {
+	userID, ok := getCurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESERVATION_ID",
+				"message": "reservation id is invalid",
+			},
+		})
+		return
+	}
+
+	reservation, err := dao.GetReservationByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_NOT_FOUND",
+				"message": "reservation not found",
+			},
+		})
+		return
+	}
+
+	if reservation.UserID != userID {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "NOT_YOUR_RESERVATION",
+				"message": "you can only confirm your own reservation",
+			},
+		})
+		return
+	}
+
+	if reservation.Status != models.ReservationStatusHeld {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_NOT_HELD",
+				"message": "only held reservations can be confirmed",
+			},
+		})
+		return
+	}
+
+	if time.Now().After(reservation.ExpiresAt) {
+		reservation.Status = models.ReservationStatusExpired
+		_ = dao.UpdateReservation(reservation)
+
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_EXPIRED",
+				"message": "reservation hold has expired",
+			},
+		})
+		return
+	}
+
+	hasConflict, err := dao.HasActiveReservationConflictExceptID(
+		reservation.ID,
+		reservation.ResourceID,
+		reservation.StartTime,
+		reservation.EndTime,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "CONFLICT_CHECK_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	if hasConflict {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_CONFLICT",
+				"message": "resource is already reserved or held for this time range",
+			},
+		})
+		return
+	}
+
+	reservation.Status = models.ReservationStatusConfirmed
+
+	if err := dao.UpdateReservation(reservation); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_CONFIRM_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	confirmedReservation, err := dao.GetReservationByID(reservation.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_DETAIL_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    confirmedReservation,
+	})
+}
+
+func CancelReservation(c *gin.Context) {
+	userID, ok := getCurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESERVATION_ID",
+				"message": "reservation id is invalid",
+			},
+		})
+		return
+	}
+
+	reservation, err := dao.GetReservationByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_NOT_FOUND",
+				"message": "reservation not found",
+			},
+		})
+		return
+	}
+
+	if reservation.UserID != userID {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "NOT_YOUR_RESERVATION",
+				"message": "you can only cancel your own reservation",
+			},
+		})
+		return
+	}
+
+	if reservation.Status == models.ReservationStatusCancelled {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "ALREADY_CANCELLED",
+				"message": "reservation already cancelled",
+			},
+		})
+		return
+	}
+
+	if reservation.Status == models.ReservationStatusExpired {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_EXPIRED",
+				"message": "expired reservation cannot be cancelled",
+			},
+		})
+		return
+	}
+
+	if reservation.Status == models.ReservationStatusHeld && time.Now().After(reservation.ExpiresAt) {
+		reservation.Status = models.ReservationStatusExpired
+		_ = dao.UpdateReservation(reservation)
+
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_EXPIRED",
+				"message": "reservation hold has expired",
+			},
+		})
+		return
+	}
+
+	reservation.Status = models.ReservationStatusCancelled
+
+	if err := dao.UpdateReservation(reservation); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_CANCEL_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	cancelledReservation, err := dao.GetReservationByID(reservation.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESERVATION_DETAIL_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    cancelledReservation,
+	})
+}
+func getCurrentUserID(c *gin.Context) (uint, bool) {
+	userIDValue, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "USER_ID_NOT_FOUND",
+				"message": "user id not found",
+			},
+		})
+		return 0, false
+	}
+
+	userID, ok := userIDValue.(uint)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_USER_ID",
+				"message": "user id is invalid",
+			},
+		})
+		return 0, false
+	}
+
+	return userID, true
+}
+
+func isWithinResourceWorkingHours(resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
+	dayOfWeek := getDayOfWeek(startTime)
+
+	workingHour, err := dao.GetWorkingHourByResourceIDAndDay(resourceID, dayOfWeek)
+	if err != nil {
+		return false, nil
+	}
+
+	if workingHour.IsClosed {
+		return false, nil
+	}
+
+	openMinutes, err := clockToMinutes(workingHour.OpenTime)
+	if err != nil {
+		return false, err
+	}
+
+	closeMinutes, err := clockToMinutes(workingHour.CloseTime)
+	if err != nil {
+		return false, err
+	}
+
+	startMinutes := startTime.Hour()*60 + startTime.Minute()
+	endMinutes := endTime.Hour()*60 + endTime.Minute()
+
+	if startMinutes < openMinutes {
+		return false, nil
+	}
+
+	if endMinutes > closeMinutes {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func getDayOfWeek(t time.Time) string {
+	switch t.Weekday() {
+	case time.Monday:
+		return models.DayMonday
+	case time.Tuesday:
+		return models.DayTuesday
+	case time.Wednesday:
+		return models.DayWednesday
+	case time.Thursday:
+		return models.DayThursday
+	case time.Friday:
+		return models.DayFriday
+	case time.Saturday:
+		return models.DaySaturday
+	case time.Sunday:
+		return models.DaySunday
+	default:
+		return ""
+	}
+}
+
+func clockToMinutes(value string) (int, error) {
+	parsedTime, err := time.Parse("15:04", value)
+	if err != nil {
+		return 0, err
+	}
+
+	return parsedTime.Hour()*60 + parsedTime.Minute(), nil
+}
+
+func AddReservationURL(r *gin.RouterGroup) {
+	reservation := r.Group("/reservation")
+	reservation.Use(middleware.AuthRequired())
+	reservation.POST("/hold", HoldReservation)
+	reservation.GET("/my", GetMyReservations)
+	reservation.POST("/:id/confirm", ConfirmReservation)
+	reservation.POST("/:id/cancel", CancelReservation)
+
+}
+package api
+
+import (
+	"net/http"
+	"reserveflow-v1/middleware"
+	"strconv"
+
+	"reserveflow-v1/dao"
+	"reserveflow-v1/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+type CreateResourceRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Capacity    int    `json:"capacity"`
+}
+
+type UpdateResourceRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Capacity    int    `json:"capacity"`
+	IsActive    *bool  `json:"is_active"`
+}
+
+func CreateResource(c *gin.Context) {
+	var req CreateResourceRequest
+
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	resource := models.Resource{
+		Name:        req.Name,
+		Description: req.Description,
+		Capacity:    req.Capacity,
+		IsActive:    true,
+	}
+
+	if err := dao.CreateResource(&resource); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_CREATE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    resource,
+	})
+}
+
+func GetAllResources(c *gin.Context) {
+	resources, err := dao.GetAllResources()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCES_LIST_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    resources,
+	})
+}
+
+func GetResourceByID(c *gin.Context) {
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	resource, err := dao.GetResourceByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_NOT_FOUND",
+				"message": "resource not found",
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    resource,
+	})
+}
+
+func UpdateResource(c *gin.Context) {
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	resource, err := dao.GetResourceByID(uint(id64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_NOT_FOUND",
+				"message": "resource not found",
+			},
+		})
+		return
+	}
+
+	var req UpdateResourceRequest
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	if req.Name != "" {
+		resource.Name = req.Name
+	}
+
+	if req.Description != "" {
+		resource.Description = req.Description
+	}
+
+	if req.Capacity > 0 {
+		resource.Capacity = req.Capacity
+	}
+
+	if req.IsActive != nil {
+		resource.IsActive = *req.IsActive
+	}
+
+	if err := dao.UpdateResource(resource); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_UPDATE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    resource,
+	})
+}
+
+func DeleteResource(c *gin.Context) {
+	id := c.Param("id")
+
+	id64, err := strconv.ParseUint(id, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	if err := dao.DeleteResource(uint(id64)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_DELETE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"message": "resource deleted",
+		},
+	})
+}
+func AddResourceURL(r *gin.RouterGroup) {
+	resources := r.Group("/resources")
+
+	resources.GET("/resources", GetAllResources)
+	resources.GET("/resources/:id", GetResourceByID)
+
+	adminResources := r.Group("/admin/resources")
+	adminResources.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+
+	adminResources.POST("", CreateResource)
+	adminResources.PUT("/:id", UpdateResource)
+	adminResources.DELETE("/:id", DeleteResource)
+}
+package commons
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	AppName string
+	AppEnv  string
+	AppPort string
+
+	PostgresHost     string
+	PostgresPort     string
+	PostgresUser     string
+	PostgresPassword string
+	PostgresDB       string
+	PostgresSSLMode  string
+
+	JWTSecret           string
+	JWTAccessTTLMinutes string
+}
+
+var AppConfig Config
+
+func LoadConfig() {
+	_ = godotenv.Load()
+
+	AppConfig = Config{
+		AppName: getEnv("APP_NAME", "reserveflow-v1"),
+		AppEnv:  getEnv("APP_ENV", "development"),
+		AppPort: getEnv("APP_PORT", "8083"),
+
+		PostgresHost:     getEnv("POSTGRES_HOST", "localhost"),
+		PostgresPort:     getEnv("POSTGRES_PORT", "5433"),
+		PostgresUser:     getEnv("POSTGRES_USER", "postgres"),
+		PostgresPassword: getEnv("POSTGRES_PASSWORD", "postgres"),
+		PostgresDB:       getEnv("POSTGRES_DB", "reserveflow_v1"),
+		PostgresSSLMode:  getEnv("POSTGRES_SSLMODE", "disable"),
+
+		JWTSecret:           getEnv("JWT_SECRET", "change-this-secret"),
+		JWTAccessTTLMinutes: getEnv("JWT_ACCESS_TTL_MINUTES", "15"),
+	}
+}
+
+func (c Config) PostgresDSN() string {
+	return fmt.Sprintf(
+		"host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
+		c.PostgresHost,
+		c.PostgresUser,
+		c.PostgresPassword,
+		c.PostgresDB,
+		c.PostgresPort,
+		c.PostgresSSLMode,
+	)
+}
+
+func getEnv(key string, fallback string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	return value
+}
+package commons
+
+import (
+	"fmt"
+	"log"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+)
+
+var DB *gorm.DB
+
+func ConnectPostgres() {
+	dsn := AppConfig.PostgresDSN()
+
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		log.Fatal("Failed the connect database: %v\n", err)
+	}
+	DB = db
+	fmt.Println("Succesfully connected to database")
+}
+package dao
+
+import (
+	"time"
+
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+func CreateReservation(reservation *models.Reservation) error {
+	return commons.DB.Create(reservation).Error
+}
+
+func GetReservationsByUserID(userID uint) ([]models.Reservation, error) {
+	var reservations []models.Reservation
+
+	err := commons.DB.
+		Preload("Resource").
+		Where("user_id = ?", userID).
+		Order("start_time desc").
+		Find(&reservations).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return reservations, nil
+}
+
+func GetReservationByID(id uint) (*models.Reservation, error) {
+	var reservation models.Reservation
+
+	err := commons.DB.
+		Preload("User").
+		Preload("Resource").
+		First(&reservation, id).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &reservation, nil
+}
+
+func UpdateReservation(reservation *models.Reservation) error {
+	return commons.DB.Save(reservation).Error
+}
+
+func HasActiveReservationConflict(resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
+	var count int64
+
+	now := time.Now()
+
+	err := commons.DB.Model(&models.Reservation{}).
+		Where("resource_id = ?", resourceID).
+		Where("start_time < ? AND end_time > ?", endTime, startTime).
+		Where(
+			"status = ? OR (status = ? AND expires_at > ?)",
+			models.ReservationStatusConfirmed,
+			models.ReservationStatusHeld,
+			now,
+		).
+		Count(&count).Error
+
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+
+func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*models.WorkingHour, error) {
+	var workingHour models.WorkingHour
+
+	err := commons.DB.
+		Where("resource_id = ?", resourceID).
+		Where("day_of_week = ?", dayOfWeek).
+		First(&workingHour).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &workingHour, nil
+}
+func HasActiveReservationConflictExceptID(reservationID uint, resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
+	var count int64
+
+	now := time.Now()
+
+	err := commons.DB.Model(&models.Reservation{}).
+		Where("id <> ?", reservationID).
+		Where("resource_id = ?", resourceID).
+		Where("start_time < ? AND end_time > ?", endTime, startTime).
+		Where(
+			"status = ? OR (status = ? AND expires_at > ?)",
+			models.ReservationStatusConfirmed,
+			models.ReservationStatusHeld,
+			now,
+		).
+		Count(&count).Error
+
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+package dao
+
+import (
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+func CreateResource(resource *models.Resource) error {
+	return commons.DB.Create(resource).Error
+}
+
+func GetAllResources() ([]models.Resource, error) {
+	var resources []models.Resource
+
+	err := commons.DB.Find(&resources).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return resources, nil
+}
+
+func GetResourceByID(id uint) (*models.Resource, error) {
+	var resource models.Resource
+
+	err := commons.DB.First(&resource, id).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return &resource, nil
+}
+
+func UpdateResource(resource *models.Resource) error {
+	return commons.DB.Save(resource).Error
+}
+
+func DeleteResource(id uint) error {
+	return commons.DB.Delete(&models.Resource{}, id).Error
+}
+package dao
+
+import (
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+func CreateUser(user *models.User) error {
+	return commons.DB.Create(user).Error
+}
+
+func GetUserByEmail(email string) (*models.User, error) {
+	var user models.User
+
+	err := commons.DB.Where("email = ?", email).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func GetUserByID(id uint) (*models.User, error) {
+	var user models.User
+	err := commons.DB.Where("id = ?", id).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+
+}
+package dao
+
+import (
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+func CreateWorkingHour(workingHour *models.WorkingHour) error {
+	return commons.DB.Create(workingHour).Error
+}
+
+func GetWorkingHoursByResourceID(resourceID uint) ([]models.WorkingHour, error) {
+	var workingHours []models.WorkingHour
+
+	err := commons.DB.
+		Where("resource_id = ?", resourceID).
+		Order("id asc").
+		Find(&workingHours).Error
+
+	if err != nil {
+		return nil, err
+	}
+
+	return workingHours, nil
+}
+
+func DeleteWorkingHoursByResourceID(resourceID uint) error {
+	return commons.DB.
+		Where("resource_id = ?", resourceID).
+		Delete(&models.WorkingHour{}).Error
+}
+package middleware
+
+import (
+	"net/http"
+
+	"reserveflow-v1/commons"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+func AuthRequired() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tokenString := c.GetHeader("Authorization")
+
+		if tokenString == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "TOKEN_REQUIRED",
+					"message": "token is required",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			return []byte(commons.AppConfig.JWTSecret), nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVALID_TOKEN",
+					"message": "token is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVALID_TOKEN_CLAIMS",
+					"message": "token claims are invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		userIDFloat, ok := claims["user_id"].(float64)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVALID_USER_ID",
+					"message": "user id is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", uint(userIDFloat))
+		c.Set("email", claims["email"])
+		c.Set("role", claims["role"])
+
+		c.Next()
+	}
+}
+package middleware
+
+import (
+	"net/http"
+
+	"reserveflow-v1/models"
+
+	"github.com/gin-gonic/gin"
+)
+
+func RequireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleValue, exists := c.Get("role")
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "ROLE_NOT_FOUND",
+					"message": "role not found",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		role, ok := roleValue.(string)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVALID_ROLE",
+					"message": "role is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		if role != models.UserRoleAdmin {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "ADMIN_REQUIRED",
+					"message": "admin permission required",
+				},
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+package models
+
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
+
+const (
+	ReservationStatusHeld      = "held"
+	ReservationStatusConfirmed = "confirmed"
+	ReservationStatusCancelled = "cancelled"
+	ReservationStatusExpired   = "expired"
+)
+
+type Reservation struct {
+	gorm.Model
+
+	UserID     uint      `gorm:"not null" json:"user_id"`
+	ResourceID uint      `gorm:"not null" json:"resource_id"`
+	StartTime  time.Time `gorm:"not null" json:"start_time"`
+	EndTime    time.Time `gorm:"not null" json:"end_time"`
+	Status     string    `gorm:"size:30;not null;default:held" json:"status"`
+	ExpiresAt  time.Time `gorm:"not null" json:"expires_at"`
+
+	User     User     `gorm:"foreignKey:UserID" json:"user"`
+	Resource Resource `gorm:"foreignKey:ResourceID" json:"resource"`
+}
+package models
+
+import "gorm.io/gorm"
+
+type Resource struct {
+	gorm.Model
+
+	Name        string `gorm:"size:120;not null" json:"name"`
+	Description string `gorm:"size:500" json:"description"`
+	Capacity    int    `gorm:"not null" json:"capacity"`
+	IsActive    bool   `gorm:"not null;default:true" json:"is_active"`
+}
+package models
+
+import "gorm.io/gorm"
+
+const (
+	UserRoleUser  = "user"
+	UserRoleAdmin = "admin"
+)
+
+type User struct {
+	gorm.Model
+
+	FullName     string `gorm:"size:120;not null" json:"full_name"`
+	Email        string `gorm:"size:255;uniqueIndex;not null" json:"email"`
+	PasswordHash string `gorm:"size:255;not null" json:"-"`
+	Role         string `gorm:"size:30;not null;default:user" json:"role"`
+}
+package models
+
+import "gorm.io/gorm"
+
+const (
+	DayMonday    = "monday"
+	DayTuesday   = "tuesday"
+	DayWednesday = "wednesday"
+	DayThursday  = "thursday"
+	DayFriday    = "friday"
+	DaySaturday  = "saturday"
+	DaySunday    = "sunday"
+)
+
+type WorkingHour struct {
+	gorm.Model
+
+	ResourceID uint     `gorm:"not null" json:"resource_id"`
+	DayOfWeek  string   `gorm:"size:20;not null" json:"day_of_week"`
+	OpenTime   string   `gorm:"size:5" json:"open_time"`
+	CloseTime  string   `gorm:"size:5" json:"close_time"`
+	IsClosed   bool     `gorm:"not null;default:false" json:"is_closed"`
+	Resource   Resource `gorm:"foreignKey:ResourceID" json:"-"`
+}
