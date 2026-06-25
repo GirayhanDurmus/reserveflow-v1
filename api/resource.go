@@ -212,9 +212,13 @@ func AddResourceURLs(r *gin.RouterGroup) {
 	resources.GET("/:id", GetResourceByID)
 
 	adminResources := r.Group("/admin/resources")
-	adminResources.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+	adminResources.Use(middleware.AuthRequired())
 
-	adminResources.POST("", CreateResource)
-	adminResources.PATCH("/:id", UpdateResource)
-	adminResources.DELETE("/:id", DeleteResource)
+	adminResources.POST("", middleware.RequireAdmin(), CreateResource)
+	adminResources.PATCH("/:id", middleware.RequireResourceAdmin(), UpdateResource)
+	adminResources.DELETE("/:id", middleware.RequireAdmin(), DeleteResource)
+
+	adminResources.GET("/:id/admins", middleware.RequireResourceAdmin(), ListResourceAdmins)
+	adminResources.POST("/:id/admins", middleware.RequireResourceAdmin(), AssignResourceAdmin)
+	adminResources.DELETE("/:id/admins/:user_id", middleware.RequireResourceAdmin(), RemoveResourceAdmin)
 }
