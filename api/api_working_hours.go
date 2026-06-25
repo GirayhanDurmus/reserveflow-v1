@@ -142,7 +142,7 @@ func GetWorkingHours(c *gin.Context) {
 }
 func AddWorkingHoursURLs(r *gin.RouterGroup) {
 	wh := r.Group("/admin/resources/:id/working-hours")
-	wh.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+	wh.Use(middleware.AuthRequired(), middleware.RequireResourceAdmin())
 
 	wh.POST("", CreateWorkingHours)
 	wh.GET("", GetWorkingHours)

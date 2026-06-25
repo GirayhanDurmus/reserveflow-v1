@@ -9,6 +9,15 @@ func CreateResourceAdmin(resourceAdmin *models.ResourceAdmin) error {
 	return commons.DB.Create(resourceAdmin).Error
 }
 
+func GetResourceAdminByID(id uint) (*models.ResourceAdmin, error) {
+	var ra models.ResourceAdmin
+	err := commons.DB.Preload("User").Preload("Resource").First(&ra, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &ra, nil
+}
+
 func IsResourceAdmin(userID uint, resourceID uint) (bool, error) {
 	var count int64
 

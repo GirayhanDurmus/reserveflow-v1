@@ -97,9 +97,16 @@ func AssignResourceAdmin(c *gin.Context) {
 		}
 	}
 
+	// Kayıt oluşturuldu; User ve Resource alanlarını dolu döndürmek için reload yap.
+	fullRecord, err := dao.GetResourceAdminByID(resourceAdmin.ID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": resourceAdmin})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data":    resourceAdmin,
+		"data":    fullRecord,
 	})
 }
 
