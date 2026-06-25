@@ -3,8 +3,10 @@ package models
 import "gorm.io/gorm"
 
 const (
-	UserRoleUser  = "user"
-	UserRoleAdmin = "admin"
+	UserRoleUser          = "user"
+	UserRoleAdmin         = "admin"
+	UserRoleResourceAdmin = "resource-admin"
+	UserRoleManager       = "manager"
 )
 
 type User struct {

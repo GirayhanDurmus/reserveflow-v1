@@ -15,7 +15,10 @@ func main() {
 	commons.LoadConfig()
 	commons.ConnectPostgres()
 
-	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}); err != nil {
+	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.ResourceAdmin{}); err != nil {
+		panic(err)
+	}
+	if err := commons.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_admins_active ON resources_admin(user_id, resource_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		panic(err)
 	}
 

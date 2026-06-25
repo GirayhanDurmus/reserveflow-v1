@@ -28,3 +28,6 @@ func GetUserByID(id uint) (*models.User, error) {
 	return &user, nil
 
 }
+func UpdateUserRole(userID uint, role string) error {
+	return commons.DB.Model(&models.User{}).Where("id = ?", userID).Update("role", role).Error
+}

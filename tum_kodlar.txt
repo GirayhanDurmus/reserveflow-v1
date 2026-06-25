@@ -23,24 +23,15 @@ func main() {
 
 	r.GET("/health", api.Health)
 
-	r.POST("/auth/register", api.Register)
-	r.POST("/auth/login", api.Login)
-
-	auth := r.Group("/auth")
-	auth.Use(middleware.AuthRequired())
-	auth.GET("/me", api.Me)
-
 	admin := r.Group("/admin")
 	admin.Use(middleware.AuthRequired(), middleware.RequireAdmin())
 	admin.GET("/ping", api.AdminPing)
-	admin.POST("/resources", api.CreateResource)
-	admin.PATCH("/resources/:id", api.UpdateResource)
-	admin.DELETE("/resources/:id", api.DeleteResource)
 
-	admin.POST("/resources/:id/working-hours", api.CreateWorkingHours)
-	admin.GET("/resources/:id/working-hours", api.GetWorkingHours)
-
-	api.AddReservationURL(r)
+	baseGroup := r.Group("/")
+	api.AddAuthURLs(baseGroup)
+	api.AddResourceURLs(baseGroup)
+	api.AddWorkingHoursURLs(baseGroup)
+	api.AddReservationURLs(baseGroup)
 
 	port := commons.AppConfig.AppPort
 
@@ -192,8 +183,8 @@ func GetWorkingHours(c *gin.Context) {
 		"data":    workingHours,
 	})
 }
-func AddWorkingHoursURL(r *gin.RouterGroup) {
-	wh := r.Group("resources/:id/working_hours")
+func AddWorkingHoursURLs(r *gin.RouterGroup) {
+	wh := r.Group("/admin/resources/:id/working-hours")
 	wh.Use(middleware.AuthRequired(), middleware.RequireAdmin())
 
 	wh.POST("", CreateWorkingHours)
@@ -989,7 +980,7 @@ func clockToMinutes(value string) (int, error) {
 	return parsedTime.Hour()*60 + parsedTime.Minute(), nil
 }
 
-func AddReservationURL(r *gin.RouterGroup) {
+func AddReservationURLs(r *gin.RouterGroup) {
 	reservation := r.Group("/reservation")
 	reservation.Use(middleware.AuthRequired())
 	reservation.POST("/hold", HoldReservation)
@@ -1205,17 +1196,17 @@ func DeleteResource(c *gin.Context) {
 		},
 	})
 }
-func AddResourceURL(r *gin.RouterGroup) {
+func AddResourceURLs(r *gin.RouterGroup) {
 	resources := r.Group("/resources")
 
-	resources.GET("/resources", GetAllResources)
-	resources.GET("/resources/:id", GetResourceByID)
+	resources.GET("", GetAllResources)
+	resources.GET("/:id", GetResourceByID)
 
 	adminResources := r.Group("/admin/resources")
 	adminResources.Use(middleware.AuthRequired(), middleware.RequireAdmin())
 
 	adminResources.POST("", CreateResource)
-	adminResources.PUT("/:id", UpdateResource)
+	adminResources.PATCH("/:id", UpdateResource)
 	adminResources.DELETE("/:id", DeleteResource)
 }
 package commons
