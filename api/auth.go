@@ -70,12 +70,23 @@ func Register(c *gin.Context) {
 		})
 		return
 	}
+	defaultRole, err := dao.GetRoleByName(models.UserRoleUser)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "ROLE_NOT_FOUND",
+				"message": "default role not found",
+			},
+		})
+		return
+	}
 
 	user := models.User{
 		FullName:     req.FullName,
 		Email:        req.Email,
 		PasswordHash: string(passwordHash),
-		Role:         models.UserRoleUser,
+		RoleID:       defaultRole.ID,
 	}
 
 	if err := dao.CreateUser(&user); err != nil {
@@ -95,7 +106,7 @@ func Register(c *gin.Context) {
 			"id":         user.ID,
 			"full_name":  user.FullName,
 			"email":      user.Email,
-			"role":       user.Role,
+			"role":       defaultRole.Name,
 			"created_at": user.CreatedAt,
 		},
 	})
@@ -150,7 +161,7 @@ func Login(c *gin.Context) {
 			"id":         user.ID,
 			"full_name":  user.FullName,
 			"email":      user.Email,
-			"role":       user.Role,
+			"role":       user.Role.Name,
 			"created_at": user.CreatedAt,
 			"token":      token,
 		},
@@ -200,7 +211,7 @@ func Me(c *gin.Context) {
 			"id":         user.ID,
 			"full_name":  user.FullName,
 			"email":      user.Email,
-			"role":       user.Role,
+			"role":       user.Role.Name,
 			"created_at": user.CreatedAt,
 		},
 	})
@@ -215,7 +226,7 @@ func GenerateToken(user *models.User) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id": user.ID,
 		"email":   user.Email,
-		"role":    user.Role,
+		"role":    user.Role.Name,
 		"exp":     time.Now().Add(time.Duration(ttlMinutes) * time.Minute).Unix(),
 		"iat":     time.Now().Unix(),
 	}

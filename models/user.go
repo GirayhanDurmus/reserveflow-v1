@@ -15,5 +15,7 @@ type User struct {
 	FullName     string `gorm:"size:120;not null" json:"full_name"`
 	Email        string `gorm:"size:255;uniqueIndex;not null" json:"email"`
 	PasswordHash string `gorm:"size:255;not null" json:"-"`
-	Role         string `gorm:"size:30;not null;default:user" json:"role"`
+
+	RoleID uint `gorm:"index" json:"role_id"`
+	Role   Role `json:"role"`
 }

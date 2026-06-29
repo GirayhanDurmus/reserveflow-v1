@@ -84,7 +84,7 @@ func AssignResourceAdmin(c *gin.Context) {
 
 	// Sadece "user" rolündekileri resource-admin'e yükselt.
 	// "manager" ve "admin" rollerine dokunma.
-	if user.Role == models.UserRoleUser {
+	if user.Role.Name == models.UserRoleUser {
 		if err := dao.UpdateUserRole(user.ID, models.UserRoleResourceAdmin); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"success": false,
@@ -177,10 +177,13 @@ func RemoveResourceAdmin(c *gin.Context) {
 		return
 	}
 
-	// Silme sonrası başka aktif ataması kalmadıysa rolü "user"a döndür.
+	// Silme sonrası başka aktif ataması kalmadıysa ve rolü resource-admin ise "user"a döndür.
 	count, err := dao.CountActiveResourceAdmins(uint(userID64))
 	if err == nil && count == 0 {
-		_ = dao.UpdateUserRole(uint(userID64), models.UserRoleUser)
+		user, err := dao.GetUserByID(uint(userID64))
+		if err == nil && user.Role.Name == models.UserRoleResourceAdmin {
+			_ = dao.UpdateUserRole(uint(userID64), models.UserRoleUser)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

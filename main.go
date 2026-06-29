@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reserveflow-v1/seeder"
 
 	"reserveflow-v1/api"
 	"reserveflow-v1/commons"
@@ -15,9 +16,10 @@ func main() {
 	commons.LoadConfig()
 	commons.ConnectPostgres()
 
-	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.ResourceAdmin{}); err != nil {
+	if err := commons.DB.AutoMigrate(&models.Role{}, &models.Permission{}, &models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.ResourceAdmin{}); err != nil {
 		panic(err)
 	}
+	seeder.SeedRolesPermisiions()
 	if err := commons.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_admins_active ON resource_admins(user_id, resource_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		panic(err)
 	}
@@ -35,6 +37,8 @@ func main() {
 	api.AddResourceURLs(baseGroup)
 	api.AddWorkingHoursURLs(baseGroup)
 	api.AddReservationURLs(baseGroup)
+
+	api.AddBackURLs(baseGroup)
 
 	port := commons.AppConfig.AppPort
 

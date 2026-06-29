@@ -2,6 +2,7 @@
 
 import (
 	"fmt"
+	"reserveflow-v1/seeder"
 
 	"reserveflow-v1/api"
 	"reserveflow-v1/commons"
@@ -15,7 +16,11 @@ func main() {
 	commons.LoadConfig()
 	commons.ConnectPostgres()
 
-	if err := commons.DB.AutoMigrate(&models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}); err != nil {
+	if err := commons.DB.AutoMigrate(&models.Role{}, &models.Permission{}, &models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.ResourceAdmin{}); err != nil {
+		panic(err)
+	}
+	seeder.SeedRolesPermisiions()
+	if err := commons.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_admins_active ON resource_admins(user_id, resource_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		panic(err)
 	}
 
@@ -32,6 +37,8 @@ func main() {
 	api.AddResourceURLs(baseGroup)
 	api.AddWorkingHoursURLs(baseGroup)
 	api.AddReservationURLs(baseGroup)
+
+	api.AddBackURLs(baseGroup)
 
 	port := commons.AppConfig.AppPort
 
@@ -185,7 +192,7 @@ func GetWorkingHours(c *gin.Context) {
 }
 func AddWorkingHoursURLs(r *gin.RouterGroup) {
 	wh := r.Group("/admin/resources/:id/working-hours")
-	wh.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+	wh.Use(middleware.AuthRequired(), middleware.RequireResourceAdmin())
 
 	wh.POST("", CreateWorkingHours)
 	wh.GET("", GetWorkingHours)
@@ -263,12 +270,23 @@ func Register(c *gin.Context) {
 		})
 		return
 	}
+	defaultRole, err := dao.GetRoleByName(models.UserRoleUser)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "ROLE_NOT_FOUND",
+				"message": "default role not found",
+			},
+		})
+		return
+	}
 
 	user := models.User{
 		FullName:     req.FullName,
 		Email:        req.Email,
 		PasswordHash: string(passwordHash),
-		Role:         models.UserRoleUser,
+		RoleID:       defaultRole.ID,
 	}
 
 	if err := dao.CreateUser(&user); err != nil {
@@ -288,7 +306,7 @@ func Register(c *gin.Context) {
 			"id":         user.ID,
 			"full_name":  user.FullName,
 			"email":      user.Email,
-			"role":       user.Role,
+			"role":       defaultRole.Name,
 			"created_at": user.CreatedAt,
 		},
 	})
@@ -343,7 +361,7 @@ func Login(c *gin.Context) {
 			"id":         user.ID,
 			"full_name":  user.FullName,
 			"email":      user.Email,
-			"role":       user.Role,
+			"role":       user.Role.Name,
 			"created_at": user.CreatedAt,
 			"token":      token,
 		},
@@ -393,7 +411,7 @@ func Me(c *gin.Context) {
 			"id":         user.ID,
 			"full_name":  user.FullName,
 			"email":      user.Email,
-			"role":       user.Role,
+			"role":       user.Role.Name,
 			"created_at": user.CreatedAt,
 		},
 	})
@@ -408,7 +426,7 @@ func GenerateToken(user *models.User) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id": user.ID,
 		"email":   user.Email,
-		"role":    user.Role,
+		"role":    user.Role.Name,
 		"exp":     time.Now().Add(time.Duration(ttlMinutes) * time.Minute).Unix(),
 		"iat":     time.Now().Unix(),
 	}
@@ -453,6 +471,109 @@ func AdminPing(c *gin.Context) {
 			"message": "admin access granted",
 		},
 	})
+}
+package api
+
+import (
+	"net/http"
+	"reserveflow-v1/dao"
+	"reserveflow-v1/middleware"
+	"reserveflow-v1/models"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type CreatePermissionRequest struct {
+	Method   string `json:"method" binding:"required"`
+	Endpoint string `json:"endpoint" binding:"required"`
+}
+
+type AssignPermissionRequest struct {
+	PermissionID uint `json:"permission_id"`
+}
+
+func GetAllRoles(c *gin.Context) {
+	roles, err := dao.GetAllRoles()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    roles,
+	})
+}
+
+func CreatePermission(c *gin.Context) {
+	var req CreatePermissionRequest
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	perm := models.Permission{
+		Method:   req.Method,
+		Endpoint: req.Endpoint,
+	}
+	if err := dao.CreatePermissions(&perm); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    perm,
+	})
+}
+
+func AssignPermission(c *gin.Context) {
+	roleIDParam := c.Param("id")
+	roleID64, err := strconv.ParseUint(roleIDParam, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "invalid roleID",
+		})
+		return
+	}
+	var req AssignPermissionRequest
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	perm, err := dao.GetPermissionsByID(req.PermissionID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "permission not found",
+		})
+		return
+	}
+	if err := dao.AssignPermissionToRole(uint(roleID64), perm); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"Mmessage": "Ä°zin basÅŸarÄ±yla atandÄ±",
+	})
+}
+
+func AddBackURLs(r *gin.RouterGroup) {
+	rbac := r.Group("/admin/roles")
+	rbac.Use(middleware.AuthRequired(), middleware.RequirePermission())
+	rbac.GET("", GetAllRoles)
+	rbac.POST("/permissions", CreatePermission)
+	rbac.POST("/:id/permissions", AssignPermission)
+
 }
 package api
 
@@ -1203,11 +1324,210 @@ func AddResourceURLs(r *gin.RouterGroup) {
 	resources.GET("/:id", GetResourceByID)
 
 	adminResources := r.Group("/admin/resources")
-	adminResources.Use(middleware.AuthRequired(), middleware.RequireAdmin())
+	adminResources.Use(middleware.AuthRequired(), middleware.RequirePermission())
 
 	adminResources.POST("", CreateResource)
 	adminResources.PATCH("/:id", UpdateResource)
 	adminResources.DELETE("/:id", DeleteResource)
+
+	adminResources.GET("/:id/admins", ListResourceAdmins)
+	adminResources.POST("/:id/admins", AssignResourceAdmin)
+	adminResources.DELETE("/:id/admins/:userId", RemoveResourceAdmin)
+}
+package api
+
+import (
+	"net/http"
+	"reserveflow-v1/dao"
+	"reserveflow-v1/models"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+type AssignResourceAdminRequest struct {
+	UserID uint `json:"user_id"`
+}
+
+func AssignResourceAdmin(c *gin.Context) {
+	resourceID64, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	var req AssignResourceAdminRequest
+	if err := c.BindJSON(&req); err != nil {
+		return
+	}
+
+	if req.UserID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_USER_ID",
+				"message": "user_id is required",
+			},
+		})
+		return
+	}
+
+	_, err = dao.GetResourceByID(uint(resourceID64))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_NOT_FOUND",
+				"message": "resource not found",
+			},
+		})
+		return
+	}
+
+	user, err := dao.GetUserByID(req.UserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "USER_NOT_FOUND",
+				"message": "user not found",
+			},
+		})
+		return
+	}
+
+	resourceAdmin := models.ResourceAdmin{
+		UserID:     req.UserID,
+		ResourceID: uint(resourceID64),
+	}
+
+	if err := dao.CreateResourceAdmin(&resourceAdmin); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_ADMIN_CREATE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	// Sadece "user" rolÃ¼ndekileri resource-admin'e yÃ¼kselt.
+	// "manager" ve "admin" rollerine dokunma.
+	if user.Role.Name == models.UserRoleUser {
+		if err := dao.UpdateUserRole(user.ID, models.UserRoleResourceAdmin); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "USER_ROLE_UPDATE_ERROR",
+					"message": err.Error(),
+				},
+			})
+			return
+		}
+	}
+
+	// KayÄ±t oluÅŸturuldu; User ve Resource alanlarÄ±nÄ± dolu dÃ¶ndÃ¼rmek iÃ§in reload yap.
+	fullRecord, err := dao.GetResourceAdminByID(resourceAdmin.ID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": resourceAdmin})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    fullRecord,
+	})
+}
+
+func ListResourceAdmins(c *gin.Context) {
+	resourceID64, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	admins, err := dao.GetResourceAdminsByResourceID(uint(resourceID64))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_ADMINS_LIST_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    admins,
+	})
+}
+
+func RemoveResourceAdmin(c *gin.Context) {
+	resourceID64, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_RESOURCE_ID",
+				"message": "resource id is invalid",
+			},
+		})
+		return
+	}
+
+	userID64, err := strconv.ParseUint(c.Param("userId"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "INVALID_USER_ID",
+				"message": "user id is invalid",
+			},
+		})
+		return
+	}
+
+	if err := dao.DeleteResourceAdmin(uint(resourceID64), uint(userID64)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error": gin.H{
+				"code":    "RESOURCE_ADMIN_DELETE_ERROR",
+				"message": err.Error(),
+			},
+		})
+		return
+	}
+
+	// Silme sonrasÄ± baÅŸka aktif atamasÄ± kalmadÄ±ysa ve rolÃ¼ resource-admin ise "user"a dÃ¶ndÃ¼r.
+	count, err := dao.CountActiveResourceAdmins(uint(userID64))
+	if err == nil && count == 0 {
+		user, err := dao.GetUserByID(uint(userID64))
+		if err == nil && user.Role.Name == models.UserRoleResourceAdmin {
+			_ = dao.UpdateUserRole(uint(userID64), models.UserRoleUser)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"message": "resource admin removed",
+		},
+	})
 }
 package commons
 
@@ -1293,10 +1613,38 @@ func ConnectPostgres() {
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatal("Failed the connect database: %v\n", err)
+		log.Fatalf("Failed the connect database: %v\n", err)
 	}
 	DB = db
 	fmt.Println("Succesfully connected to database")
+}
+package dao
+
+import (
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+func GetAllRoles() ([]models.Role, error) {
+	var roles []models.Role
+	err := commons.DB.Preload("Permissions").Find(&roles).Error
+	if err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+func CreatePermissions(perm *models.Permission) error {
+	return commons.DB.Create(perm).Error
+}
+
+func GetPermissionsByID(id uint) (*models.Permission, error) {
+	var permission models.Permission
+	err := commons.DB.First(&permission, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &permission, nil
 }
 package dao
 
@@ -1453,6 +1801,85 @@ import (
 	"reserveflow-v1/models"
 )
 
+func CreateResourceAdmin(resourceAdmin *models.ResourceAdmin) error {
+	return commons.DB.Create(resourceAdmin).Error
+}
+
+func GetResourceAdminByID(id uint) (*models.ResourceAdmin, error) {
+	var ra models.ResourceAdmin
+	err := commons.DB.Preload("User").Preload("Resource").First(&ra, id).Error
+	if err != nil {
+		return nil, err
+	}
+	return &ra, nil
+}
+
+func IsResourceAdmin(userID uint, resourceID uint) (bool, error) {
+	var count int64
+
+	err := commons.DB.Model(&models.ResourceAdmin{}).Where("user_id = ? AND resource_id = ?", userID, resourceID).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func GetResourceAdminsByResourceID(resourceID uint) ([]models.ResourceAdmin, error) {
+	var admins []models.ResourceAdmin
+	err := commons.DB.Preload("User").Preload("Resource").Where("resource_id = ?", resourceID).Find(&admins).Error
+	if err != nil {
+		return nil, err
+	}
+	return admins, nil
+}
+
+func DeleteResourceAdmin(resourceID uint, userID uint) error {
+	return commons.DB.Where("resource_id = ? AND user_id = ? ", resourceID, userID).Delete(&models.ResourceAdmin{}).Error
+}
+func CountActiveResourceAdmins(userID uint) (int64, error) {
+	var count int64
+	err := commons.DB.Model(&models.ResourceAdmin{}).
+		Where("user_id = ?", userID).Count(&count).Error
+	return count, err
+}
+package dao
+
+import (
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+func GetWithPermission(roleID uint) (*models.Role, error) {
+	var role models.Role
+	err := commons.DB.Preload("Permissions").Where("id = ?", roleID).First(&role).Error
+	if err != nil {
+		return nil, err
+	}
+	return &role, nil
+}
+
+func GetRoleByName(name string) (*models.Role, error) {
+	var role models.Role
+	err := commons.DB.Where("name = ?", name).First(&role).Error
+	if err != nil {
+		return nil, err
+	}
+	return &role, nil
+}
+
+func AssignPermissionToRole(roleID uint, perm *models.Permission) error {
+	role := models.Role{}
+	role.ID = roleID
+	return commons.DB.Model(&role).Association("Permission").Append(perm)
+
+}
+package dao
+
+import (
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
 func CreateUser(user *models.User) error {
 	return commons.DB.Create(user).Error
 }
@@ -1475,6 +1902,9 @@ func GetUserByID(id uint) (*models.User, error) {
 	}
 	return &user, nil
 
+}
+func UpdateUserRole(userID uint, role string) error {
+	return commons.DB.Model(&models.User{}).Where("id = ?", userID).Update("role", role).Error
 }
 package dao
 
@@ -1511,6 +1941,8 @@ package middleware
 
 import (
 	"net/http"
+	"reserveflow-v1/dao"
+	"strings"
 
 	"reserveflow-v1/commons"
 
@@ -1583,10 +2015,78 @@ func AuthRequired() gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+func RequirePermission() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userIDValue, exists := c.Get("user_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "UNAUTHORIZED_CODE",
+					"message": "User Not Found",
+				},
+			})
+			c.Abort()
+			return
+		}
+		user, err := dao.GetUserByID(userIDValue.(uint))
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "USER_NOT_FOUND",
+					"message": "User Not Found",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		role, err := dao.GetWithPermission(user.RoleID)
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "UNAUTHORIZED_CODE",
+					"message": "role setup is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		requsetMethod := c.Request.Method
+		requestEndpoint := c.FullPath()
+
+		hashpermission := false
+
+		for _, perm := range role.Permission {
+			if strings.ToUpper(perm.Method) == strings.ToUpper(requsetMethod) && perm.Endpoint == requestEndpoint {
+				hashpermission = true
+				break
+			}
+		}
+		if !hashpermission {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "FORBIDDEN",
+					"message": "You have no permission to perform this action",
+				},
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
 package middleware
 
 import (
 	"net/http"
+	"reserveflow-v1/dao"
+	"strconv"
 
 	"reserveflow-v1/models"
 
@@ -1635,6 +2135,123 @@ func RequireAdmin() gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+func RequireResourceAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		roleValue, exists := c.Get("role")
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "ROLE_NOTFOUND",
+					"message": "role not found",
+				},
+			})
+			c.Abort()
+			return
+		}
+		role, ok := roleValue.(string)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVAL_ID_CODE",
+					"message": "role is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+		if role == models.UserRoleAdmin {
+			c.Next()
+			return
+		}
+		if role != models.UserRoleResourceAdmin && role != models.UserRoleManager {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INSUFFICIENT_ROLE",
+					"message": "resource admin permission required",
+				},
+			})
+			c.Abort()
+			return
+		}
+		userIDValue, exists := c.Get("user_id")
+		if !exists {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "USER_ID_NOTFOUND",
+					"message": "user not found",
+				},
+			})
+			c.Abort()
+			return
+		}
+		userID, ok := userIDValue.(uint)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVALID_USER_ID",
+					"message": "user id is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+		resourceIDParam := c.Param("id")
+
+		resourceID64, err := strconv.ParseUint(resourceIDParam, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "INVALID_RESOURCE_ID",
+					"message": "resource id is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+		isResourceAdmin, err := dao.IsResourceAdmin(userID, uint(resourceID64))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "RESOURCE_ADMIN_CHECK_ERROR",
+					"message": err.Error(),
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		if !isResourceAdmin {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "UNAUTHORIZED_ACCESS",
+					"message": "You are not authorized to access this resource",
+				},
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+
+}
+package models
+
+import "gorm.io/gorm"
+
+type Permission struct {
+	gorm.Model
+	Method   string `gorm:"size:10;not null" json:"method"`
+	Endpoint string `gorm:"size:255;not null" json:"endpoint"`
+}
 package models
 
 import (
@@ -1679,9 +2296,36 @@ package models
 
 import "gorm.io/gorm"
 
+type ResourceAdmin struct {
+	gorm.Model
+
+	UserID     uint `gorm:"not null;index" json:"user_id"`
+	ResourceID uint `gorm:"not null;index" json:"resource_id"`
+
+	User     User     `gorm:"foreignKey:UserID"     json:"user,omitempty"`
+	Resource Resource `gorm:"foreignKey:ResourceID" json:"resource,omitempty"`
+}
+package models
+
+import (
+	"gorm.io/gorm"
+)
+
+type Role struct {
+	gorm.Model
+	Name        string       `gorm:"size:50;not null;uniqueIndex" json:"name"`
+	Description string       `json:"description"`
+	Permission  []Permission `gorm:"many2many:role_permissions;" json:"permissions"`
+}
+package models
+
+import "gorm.io/gorm"
+
 const (
-	UserRoleUser  = "user"
-	UserRoleAdmin = "admin"
+	UserRoleUser          = "user"
+	UserRoleAdmin         = "admin"
+	UserRoleResourceAdmin = "resource-admin"
+	UserRoleManager       = "manager"
 )
 
 type User struct {
@@ -1690,7 +2334,9 @@ type User struct {
 	FullName     string `gorm:"size:120;not null" json:"full_name"`
 	Email        string `gorm:"size:255;uniqueIndex;not null" json:"email"`
 	PasswordHash string `gorm:"size:255;not null" json:"-"`
-	Role         string `gorm:"size:30;not null;default:user" json:"role"`
+
+	RoleID uint `gorm:"index" json:"role_id"`
+	Role   Role `json:"role"`
 }
 package models
 
@@ -1715,4 +2361,53 @@ type WorkingHour struct {
 	CloseTime  string   `gorm:"size:5" json:"close_time"`
 	IsClosed   bool     `gorm:"not null;default:false" json:"is_closed"`
 	Resource   Resource `gorm:"foreignKey:ResourceID" json:"-"`
+}
+package seeder
+
+import (
+	"fmt"
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+
+	"gorm.io/gorm"
+)
+
+func SeedRolesPermisiions() {
+
+	roles := []models.Role{
+		{Name: models.UserRoleUser, Description: "Normal User"},
+		{Name: models.UserRoleResourceAdmin, Description: "System Manager"},
+		{Name: models.UserRoleAdmin, Description: "Normal Admin"},
+		{Name: models.UserRoleResourceAdmin, Description: "Resource Manager"},
+		{Name: models.UserRoleManager, Description: "Manager"},
+	}
+	for i, role := range roles {
+		var existingRole models.Role
+		err := commons.DB.Where("name = ?", role.Name).First(&existingRole).Error
+		if err == gorm.ErrRecordNotFound {
+			commons.DB.Create(&roles[i])
+			fmt.Printf("Role '%s' created\n", role.Name)
+		}
+	}
+	adminPermissions := []models.Permission{
+		{Method: "GET", Endpoint: "/admin/roles"},
+		{Method: "POST", Endpoint: "/admin/roles/permision"},
+		{Method: "POST", Endpoint: "/admin/roles/:id/permision"},
+	}
+	for i, perm := range adminPermissions {
+		var existingPerm models.Permission
+		err := commons.DB.Where("method = ? AND endpoint = ?", perm.Method, perm.Endpoint).First(&existingPerm).Error
+		if err == gorm.ErrRecordNotFound {
+			commons.DB.Create(&adminPermissions[i])
+			fmt.Printf("Permission '%s %s' created\n", perm.Method, perm.Endpoint)
+		} else {
+			adminPermissions[i] = existingPerm
+		}
+	}
+	var AdminRole models.Role
+	if err := commons.DB.Where("name = ?", models.UserRoleAdmin).First(&AdminRole).Error; err == nil {
+		commons.DB.Model(&AdminRole).Association("Permission").Append(&adminPermissions)
+		fmt.Println("Admin permissions assigned to Admin role")
+	}
+
 }

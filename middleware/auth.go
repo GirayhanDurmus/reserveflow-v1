@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"net/http"
+	"reserveflow-v1/dao"
+	"strings"
 
 	"reserveflow-v1/commons"
 
@@ -71,6 +73,72 @@ func AuthRequired() gin.HandlerFunc {
 		c.Set("email", claims["email"])
 		c.Set("role", claims["role"])
 
+		c.Next()
+	}
+}
+
+func RequirePermission() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userIDValue, exists := c.Get("user_id")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "UNAUTHORIZED_CODE",
+					"message": "User Not Found",
+				},
+			})
+			c.Abort()
+			return
+		}
+		user, err := dao.GetUserByID(userIDValue.(uint))
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "USER_NOT_FOUND",
+					"message": "User Not Found",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		role, err := dao.GetWithPermission(user.RoleID)
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "UNAUTHORIZED_CODE",
+					"message": "role setup is invalid",
+				},
+			})
+			c.Abort()
+			return
+		}
+
+		requsetMethod := c.Request.Method
+		requestEndpoint := c.FullPath()
+
+		hashpermission := false
+
+		for _, perm := range role.Permission {
+			if strings.ToUpper(perm.Method) == strings.ToUpper(requsetMethod) && perm.Endpoint == requestEndpoint {
+				hashpermission = true
+				break
+			}
+		}
+		if !hashpermission {
+			c.JSON(http.StatusForbidden, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "FORBIDDEN",
+					"message": "You have no permission to perform this action",
+				},
+			})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
