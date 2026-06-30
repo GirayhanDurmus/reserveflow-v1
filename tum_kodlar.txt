@@ -562,8 +562,8 @@ func AssignPermission(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"success":  true,
-		"Mmessage": "Ä°zin basÅŸarÄ±yla atandÄ±",
+		"success": true,
+		"message": "Ä°zin basÅŸarÄ±yla atandÄ±",
 	})
 }
 
@@ -1627,7 +1627,7 @@ import (
 
 func GetAllRoles() ([]models.Role, error) {
 	var roles []models.Role
-	err := commons.DB.Preload("Permissions").Find(&roles).Error
+	err := commons.DB.Preload("Permission").Find(&roles).Error
 	if err != nil {
 		return nil, err
 	}
@@ -1851,7 +1851,7 @@ import (
 
 func GetWithPermission(roleID uint) (*models.Role, error) {
 	var role models.Role
-	err := commons.DB.Preload("Permissions").Where("id = ?", roleID).First(&role).Error
+	err := commons.DB.Preload("Permission").Where("id = ?", roleID).First(&role).Error
 	if err != nil {
 		return nil, err
 	}
@@ -1887,7 +1887,7 @@ func CreateUser(user *models.User) error {
 func GetUserByEmail(email string) (*models.User, error) {
 	var user models.User
 
-	err := commons.DB.Where("email = ?", email).First(&user).Error
+	err := commons.DB.Preload("Role").Where("email = ?", email).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -1896,7 +1896,7 @@ func GetUserByEmail(email string) (*models.User, error) {
 
 func GetUserByID(id uint) (*models.User, error) {
 	var user models.User
-	err := commons.DB.Where("id = ?", id).First(&user).Error
+	err := commons.DB.Preload("Role").Where("id = ?", id).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -2330,12 +2330,11 @@ const (
 
 type User struct {
 	gorm.Model
-
 	FullName     string `gorm:"size:120;not null" json:"full_name"`
 	Email        string `gorm:"size:255;uniqueIndex;not null" json:"email"`
 	PasswordHash string `gorm:"size:255;not null" json:"-"`
 
-	RoleID uint `gorm:"index" json:"role_id"`
+	RoleID uint `gorm:"index;not null" json:"role_id"`
 	Role   Role `json:"role"`
 }
 package models
@@ -2378,7 +2377,6 @@ func SeedRolesPermisiions() {
 		{Name: models.UserRoleUser, Description: "Normal User"},
 		{Name: models.UserRoleResourceAdmin, Description: "System Manager"},
 		{Name: models.UserRoleAdmin, Description: "Normal Admin"},
-		{Name: models.UserRoleResourceAdmin, Description: "Resource Manager"},
 		{Name: models.UserRoleManager, Description: "Manager"},
 	}
 	for i, role := range roles {
@@ -2391,8 +2389,8 @@ func SeedRolesPermisiions() {
 	}
 	adminPermissions := []models.Permission{
 		{Method: "GET", Endpoint: "/admin/roles"},
-		{Method: "POST", Endpoint: "/admin/roles/permision"},
-		{Method: "POST", Endpoint: "/admin/roles/:id/permision"},
+		{Method: "POST", Endpoint: "/admin/roles/permissions"},
+		{Method: "POST", Endpoint: "/admin/roles/:id/permissions"},
 	}
 	for i, perm := range adminPermissions {
 		var existingPerm models.Permission

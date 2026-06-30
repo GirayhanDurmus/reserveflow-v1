@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"reserveflow-v1/seeder"
+	"reserveflow-v1/worker"
 
 	"reserveflow-v1/api"
 	"reserveflow-v1/commons"
@@ -23,6 +24,10 @@ func main() {
 	if err := commons.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_admins_active ON resource_admins(user_id, resource_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		panic(err)
 	}
+
+	// Süresi dolan rezervasyonları arka planda iptal eden worker pool'u başlat
+	// 3 adet paralel goroutine işçi çalışacak
+	worker.InitWorkerPool(3)
 
 	r := gin.Default()
 

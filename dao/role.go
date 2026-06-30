@@ -7,7 +7,7 @@ import (
 
 func GetWithPermission(roleID uint) (*models.Role, error) {
 	var role models.Role
-	err := commons.DB.Preload("Permissions").Where("id = ?", roleID).First(&role).Error
+	err := commons.DB.Preload("Permission").Where("id = ?", roleID).First(&role).Error
 	if err != nil {
 		return nil, err
 	}

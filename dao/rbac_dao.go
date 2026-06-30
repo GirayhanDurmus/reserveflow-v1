@@ -7,7 +7,7 @@ import (
 
 func GetAllRoles() ([]models.Role, error) {
 	var roles []models.Role
-	err := commons.DB.Preload("Permissions").Find(&roles).Error
+	err := commons.DB.Preload("Permission").Find(&roles).Error
 	if err != nil {
 		return nil, err
 	}

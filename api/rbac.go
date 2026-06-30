@@ -88,8 +88,8 @@ func AssignPermission(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"success":  true,
-		"Mmessage": "İzin basşarıyla atandı",
+		"success": true,
+		"message": "İzin basşarıyla atandı",
 	})
 }
 

@@ -14,7 +14,6 @@ func SeedRolesPermisiions() {
 		{Name: models.UserRoleUser, Description: "Normal User"},
 		{Name: models.UserRoleResourceAdmin, Description: "System Manager"},
 		{Name: models.UserRoleAdmin, Description: "Normal Admin"},
-		{Name: models.UserRoleResourceAdmin, Description: "Resource Manager"},
 		{Name: models.UserRoleManager, Description: "Manager"},
 	}
 	for i, role := range roles {
@@ -27,8 +26,8 @@ func SeedRolesPermisiions() {
 	}
 	adminPermissions := []models.Permission{
 		{Method: "GET", Endpoint: "/admin/roles"},
-		{Method: "POST", Endpoint: "/admin/roles/permision"},
-		{Method: "POST", Endpoint: "/admin/roles/:id/permision"},
+		{Method: "POST", Endpoint: "/admin/roles/permissions"},
+		{Method: "POST", Endpoint: "/admin/roles/:id/permissions"},
 	}
 	for i, perm := range adminPermissions {
 		var existingPerm models.Permission

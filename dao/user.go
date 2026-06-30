@@ -12,7 +12,7 @@ func CreateUser(user *models.User) error {
 func GetUserByEmail(email string) (*models.User, error) {
 	var user models.User
 
-	err := commons.DB.Where("email = ?", email).First(&user).Error
+	err := commons.DB.Preload("Role").Where("email = ?", email).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
@@ -21,7 +21,7 @@ func GetUserByEmail(email string) (*models.User, error) {
 
 func GetUserByID(id uint) (*models.User, error) {
 	var user models.User
-	err := commons.DB.Where("id = ?", id).First(&user).Error
+	err := commons.DB.Preload("Role").Where("id = ?", id).First(&user).Error
 	if err != nil {
 		return nil, err
 	}
