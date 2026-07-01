@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"reserveflow-v1/middleware"
 	"strconv"
@@ -459,6 +460,12 @@ func getCurrentUserID(c *gin.Context) (uint, bool) {
 }
 
 func isWithinResourceWorkingHours(resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
+	// Farklı günlere yayılan rezervasyonları desteklemiyoruz.
+	// Saat karşılaştırması anlamsız hale gelir (örn: 23:00 → 01:00).
+	if startTime.Day() != endTime.Day() || startTime.Month() != endTime.Month() || startTime.Year() != endTime.Year() {
+		return false, fmt.Errorf("cross-day reservations are not supported")
+	}
+
 	dayOfWeek := getDayOfWeek(startTime)
 
 	workingHour, err := dao.GetWorkingHourByResourceIDAndDay(resourceID, dayOfWeek)

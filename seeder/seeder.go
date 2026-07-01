@@ -8,12 +8,12 @@ import (
 	"gorm.io/gorm"
 )
 
-func SeedRolesPermisiions() {
+func SeedRolesPermissions() {
 
 	roles := []models.Role{
 		{Name: models.UserRoleUser, Description: "Normal User"},
 		{Name: models.UserRoleResourceAdmin, Description: "System Manager"},
-		{Name: models.UserRoleAdmin, Description: "Normal Admin"},
+		{Name: models.UserRoleAdmin, Description: "Super Admin"},
 		{Name: models.UserRoleManager, Description: "Manager"},
 	}
 	for i, role := range roles {
@@ -42,7 +42,7 @@ func SeedRolesPermisiions() {
 	var AdminRole models.Role
 	if err := commons.DB.Where("name = ?", models.UserRoleAdmin).First(&AdminRole).Error; err == nil {
 		commons.DB.Model(&AdminRole).Association("Permission").Append(&adminPermissions)
-		fmt.Println("Admin permissions assigned to Admin role")
+		fmt.Println("Admin permissions assigned to Super Admin role")
 	}
 
 }

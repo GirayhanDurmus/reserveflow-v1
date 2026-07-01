@@ -42,8 +42,8 @@ func RequireAdmin() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"error": gin.H{
-					"code":    "ADMIN_REQUIRED",
-					"message": "admin permission required",
+					"code":    "SUPER_ADMIN_REQUIRED",
+					"message": "super admin permission required",
 				},
 			})
 			c.Abort()

@@ -20,7 +20,7 @@ func main() {
 	if err := commons.DB.AutoMigrate(&models.Role{}, &models.Permission{}, &models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.ResourceAdmin{}); err != nil {
 		panic(err)
 	}
-	seeder.SeedRolesPermisiions()
+	seeder.SeedRolesPermissions()
 	if err := commons.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_admins_active ON resource_admins(user_id, resource_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		panic(err)
 	}

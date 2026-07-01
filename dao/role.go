@@ -26,6 +26,17 @@ func GetRoleByName(name string) (*models.Role, error) {
 func AssignPermissionToRole(roleID uint, perm *models.Permission) error {
 	role := models.Role{}
 	role.ID = roleID
-	return commons.DB.Model(&role).Association("Permission").Append(perm)
 
+	// Aynı permission zaten atanmış mı kontrol et
+	var count int64
+	commons.DB.Table("role_permissions").
+		Where("role_id = ? AND permission_id = ?", roleID, perm.ID).
+		Count(&count)
+
+	if count > 0 {
+		// Zaten atanmış — tekrar ekleme, hata da döndürme
+		return nil
+	}
+
+	return commons.DB.Model(&role).Association("Permission").Append(perm)
 }

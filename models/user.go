@@ -4,7 +4,7 @@ import "gorm.io/gorm"
 
 const (
 	UserRoleUser          = "user"
-	UserRoleAdmin         = "admin"
+	UserRoleAdmin         = "super-admin"
 	UserRoleResourceAdmin = "resource-admin"
 	UserRoleManager       = "manager"
 )
