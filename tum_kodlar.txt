@@ -3,6 +3,7 @@
 import (
 	"fmt"
 	"reserveflow-v1/seeder"
+	"reserveflow-v1/worker"
 
 	"reserveflow-v1/api"
 	"reserveflow-v1/commons"
@@ -19,10 +20,14 @@ func main() {
 	if err := commons.DB.AutoMigrate(&models.Role{}, &models.Permission{}, &models.User{}, &models.Resource{}, &models.WorkingHour{}, &models.Reservation{}, &models.ResourceAdmin{}); err != nil {
 		panic(err)
 	}
-	seeder.SeedRolesPermisiions()
+	seeder.SeedRolesPermissions()
 	if err := commons.DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_resource_admins_active ON resource_admins(user_id, resource_id) WHERE deleted_at IS NULL`).Error; err != nil {
 		panic(err)
 	}
+
+	// SÃ¼resi dolan rezervasyonlarÄ± arka planda iptal eden worker pool'u baÅŸlat
+	// 3 adet paralel goroutine iÅŸÃ§i Ã§alÄ±ÅŸacak
+	worker.InitWorkerPool(3)
 
 	r := gin.Default()
 
@@ -578,6 +583,7 @@ func AddBackURLs(r *gin.RouterGroup) {
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"reserveflow-v1/middleware"
 	"strconv"
@@ -1036,6 +1042,12 @@ func getCurrentUserID(c *gin.Context) (uint, bool) {
 }
 
 func isWithinResourceWorkingHours(resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
+	// FarklÄ± gÃ¼nlere yayÄ±lan rezervasyonlarÄ± desteklemiyoruz.
+	// Saat karÅŸÄ±laÅŸtÄ±rmasÄ± anlamsÄ±z hale gelir (Ã¶rn: 23:00 â†’ 01:00).
+	if startTime.Day() != endTime.Day() || startTime.Month() != endTime.Month() || startTime.Year() != endTime.Year() {
+		return false, fmt.Errorf("cross-day reservations are not supported")
+	}
+
 	dayOfWeek := getDayOfWeek(startTime)
 
 	workingHour, err := dao.GetWorkingHourByResourceIDAndDay(resourceID, dayOfWeek)
@@ -1870,8 +1882,19 @@ func GetRoleByName(name string) (*models.Role, error) {
 func AssignPermissionToRole(roleID uint, perm *models.Permission) error {
 	role := models.Role{}
 	role.ID = roleID
-	return commons.DB.Model(&role).Association("Permission").Append(perm)
 
+	// AynÄ± permission zaten atanmÄ±ÅŸ mÄ± kontrol et
+	var count int64
+	commons.DB.Table("role_permissions").
+		Where("role_id = ? AND permission_id = ?", roleID, perm.ID).
+		Count(&count)
+
+	if count > 0 {
+		// Zaten atanmÄ±ÅŸ â€” tekrar ekleme, hata da dÃ¶ndÃ¼rme
+		return nil
+	}
+
+	return commons.DB.Model(&role).Association("Permission").Append(perm)
 }
 package dao
 
@@ -1903,8 +1926,12 @@ func GetUserByID(id uint) (*models.User, error) {
 	return &user, nil
 
 }
-func UpdateUserRole(userID uint, role string) error {
-	return commons.DB.Model(&models.User{}).Where("id = ?", userID).Update("role", role).Error
+func UpdateUserRole(userID uint, roleName string) error {
+	var role models.Role
+	if err := commons.DB.Where("name = ?", roleName).First(&role).Error; err != nil {
+		return err
+	}
+	return commons.DB.Model(&models.User{}).Where("id = ?", userID).Update("role_id", role.ID).Error
 }
 package dao
 
@@ -2125,8 +2152,8 @@ func RequireAdmin() gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"success": false,
 				"error": gin.H{
-					"code":    "ADMIN_REQUIRED",
-					"message": "admin permission required",
+					"code":    "SUPER_ADMIN_REQUIRED",
+					"message": "super admin permission required",
 				},
 			})
 			c.Abort()
@@ -2323,7 +2350,7 @@ import "gorm.io/gorm"
 
 const (
 	UserRoleUser          = "user"
-	UserRoleAdmin         = "admin"
+	UserRoleAdmin         = "super-admin"
 	UserRoleResourceAdmin = "resource-admin"
 	UserRoleManager       = "manager"
 )
@@ -2371,12 +2398,12 @@ import (
 	"gorm.io/gorm"
 )
 
-func SeedRolesPermisiions() {
+func SeedRolesPermissions() {
 
 	roles := []models.Role{
 		{Name: models.UserRoleUser, Description: "Normal User"},
 		{Name: models.UserRoleResourceAdmin, Description: "System Manager"},
-		{Name: models.UserRoleAdmin, Description: "Normal Admin"},
+		{Name: models.UserRoleAdmin, Description: "Super Admin"},
 		{Name: models.UserRoleManager, Description: "Manager"},
 	}
 	for i, role := range roles {
@@ -2405,7 +2432,100 @@ func SeedRolesPermisiions() {
 	var AdminRole models.Role
 	if err := commons.DB.Where("name = ?", models.UserRoleAdmin).First(&AdminRole).Error; err == nil {
 		commons.DB.Model(&AdminRole).Association("Permission").Append(&adminPermissions)
-		fmt.Println("Admin permissions assigned to Admin role")
+		fmt.Println("Admin permissions assigned to Super Admin role")
 	}
 
+}
+package worker
+
+import (
+	"fmt"
+	"log"
+	"time"
+
+	"reserveflow-v1/commons"
+	"reserveflow-v1/models"
+)
+
+// expiredJobs: iÅŸÃ§ilerin (worker goroutine'lerin) iÅŸ alacaÄŸÄ± kanal (tepsi).
+// Buffered Channel â€” aynÄ± anda 100 rezervasyon ID'si bekleyebilir, bloke olmaz.
+var expiredJobs chan uint
+
+// InitWorkerPool sunucu baÅŸlarken bir kez Ã§aÄŸrÄ±lÄ±r.
+// numWorkers: kaÃ§ adet paralel iÅŸÃ§i goroutine baÅŸlatÄ±lacaÄŸÄ±.
+func InitWorkerPool(numWorkers int) {
+	expiredJobs = make(chan uint, 100)
+
+	log.Printf("[WorkerPool] %d iÅŸÃ§i baÅŸlatÄ±lÄ±yor...\n", numWorkers)
+
+	// Her iÅŸÃ§iyi ayrÄ± bir goroutine olarak baÅŸlat
+	for i := 1; i <= numWorkers; i++ {
+		go processJob(i, expiredJobs)
+	}
+
+	// Åefi (dispatcher) baÅŸlat â€” periyodik DB taramasÄ± yapar
+	go dispatcher()
+
+	log.Println("[WorkerPool] Sistem hazÄ±r. SÃ¼resi dolan rezervasyonlar izleniyor.")
+}
+
+// processJob: Her iÅŸÃ§inin dÃ¶ngÃ¼sÃ¼.
+// Kanaldan bir ID geldiÄŸinde o rezervasyonu "expired" yapar.
+// Kanal kapanana kadar beklemede kalÄ±r (for range pattern).
+func processJob(workerID int, jobs <-chan uint) {
+	for resID := range jobs {
+		err := commons.DB.
+			Model(&models.Reservation{}).
+			Where("id = ? AND status = ?", resID, models.ReservationStatusHeld).
+			Update("status", models.ReservationStatusExpired).Error
+
+		if err != nil {
+			log.Printf("[Worker-%d] HATA: Rezervasyon #%d gÃ¼ncellenemedi: %v\n", workerID, resID, err)
+		} else {
+			fmt.Printf("[Worker-%d] Rezervasyon #%d â†’ 'expired' yapÄ±ldÄ±.\n", workerID, resID)
+		}
+	}
+}
+
+// dispatcher: Periyodik olarak (her 1 dakika) DB'yi tarar.
+// SÃ¼resi geÃ§miÅŸ ama hÃ¢lÃ¢ "held" durumundaki rezervasyonlarÄ± bulur
+// ve ID'lerini expiredJobs kanalÄ±na gÃ¶nderir.
+func dispatcher() {
+	// Ä°lk Ã§alÄ±ÅŸmada beklemeden hemen bir tarama yap
+	scanAndDispatch()
+
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		scanAndDispatch()
+	}
+}
+
+// scanAndDispatch: tek bir DB tarama turunu gerÃ§ekleÅŸtirir.
+// Pluck sadece ID sÃ¼tununu Ã§eker â€” bÃ¼yÃ¼k tablolarda RAM dostudur.
+func scanAndDispatch() {
+	var expiredIDs []uint
+
+	err := commons.DB.
+		Model(&models.Reservation{}).
+		Where("status = ? AND expires_at < ?", models.ReservationStatusHeld, time.Now()).
+		Pluck("id", &expiredIDs).Error
+
+	if err != nil {
+		log.Printf("[Dispatcher] DB tarama hatasÄ±: %v\n", err)
+		return
+	}
+
+	if len(expiredIDs) == 0 {
+		return
+	}
+
+	log.Printf("[Dispatcher] %d adet sÃ¼resi dolmuÅŸ rezervasyon bulundu, iÅŸÃ§ilere gÃ¶nderiliyor...\n", len(expiredIDs))
+
+	for _, id := range expiredIDs {
+		// Kanal dolu ise bu satÄ±r bloke olur â€” kasÄ±tlÄ± olarak bÄ±rakÄ±ldÄ±.
+		// Ãœretici (dispatcher) tÃ¼keticilerden (workers) hÄ±zlÄ± olmamalÄ±.
+		expiredJobs <- id
+	}
 }

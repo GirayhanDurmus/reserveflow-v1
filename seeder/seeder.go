@@ -25,9 +25,18 @@ func SeedRolesPermissions() {
 		}
 	}
 	adminPermissions := []models.Permission{
+		// RBAC yönetimi
 		{Method: "GET", Endpoint: "/admin/roles"},
 		{Method: "POST", Endpoint: "/admin/roles/permissions"},
 		{Method: "POST", Endpoint: "/admin/roles/:id/permissions"},
+		// Kaynak CRUD
+		{Method: "POST", Endpoint: "/admin/resources"},
+		{Method: "PATCH", Endpoint: "/admin/resources/:id"},
+		{Method: "DELETE", Endpoint: "/admin/resources/:id"},
+		// Resource Admin yönetimi
+		{Method: "GET", Endpoint: "/admin/resources/:id/admins"},
+		{Method: "POST", Endpoint: "/admin/resources/:id/admins"},
+		{Method: "DELETE", Endpoint: "/admin/resources/:id/admins/:userId"},
 	}
 	for i, perm := range adminPermissions {
 		var existingPerm models.Permission

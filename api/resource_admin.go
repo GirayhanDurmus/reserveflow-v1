@@ -83,7 +83,7 @@ func AssignResourceAdmin(c *gin.Context) {
 	}
 
 	// Sadece "user" rolündekileri resource-admin'e yükselt.
-	// "manager" ve "admin" rollerine dokunma.
+	// "manager" ve "super-admin" rollerine dokunma.
 	if user.Role.Name == models.UserRoleUser {
 		if err := dao.UpdateUserRole(user.ID, models.UserRoleResourceAdmin); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
