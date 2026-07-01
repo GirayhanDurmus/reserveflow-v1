@@ -110,30 +110,6 @@ func HoldReservation(c *gin.Context) {
 		})
 		return
 	}
-
-	hasConflict, err := dao.HasActiveReservationConflict(resource.ID, startTime, endTime)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error": gin.H{
-				"code":    "CONFLICT_CHECK_ERROR",
-				"message": err.Error(),
-			},
-		})
-		return
-	}
-
-	if hasConflict {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"error": gin.H{
-				"code":    "RESERVATION_CONFLICT",
-				"message": "resource is already reserved or held for this time range",
-			},
-		})
-		return
-	}
-
 	reservation := models.Reservation{
 		UserID:     userID,
 		ResourceID: resource.ID,
@@ -142,8 +118,18 @@ func HoldReservation(c *gin.Context) {
 		Status:     models.ReservationStatusHeld,
 		ExpiresAt:  time.Now().Add(10 * time.Minute),
 	}
+	if err := dao.HoldReservationWithTx(&reservation); err != nil {
+		if err.Error() == "RESERVATION_CONFLICT" {
+			c.JSON(http.StatusConflict, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "RESERVATION_CONFLICT",
+					"message": "resource is already reserved or held for this time range",
+				},
+			})
+			return
+		}
 
-	if err := dao.CreateReservation(&reservation); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error": gin.H{

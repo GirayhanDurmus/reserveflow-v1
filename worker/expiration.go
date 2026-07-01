@@ -5,8 +5,7 @@ import (
 	"log"
 	"time"
 
-	"reserveflow-v1/commons"
-	"reserveflow-v1/models"
+	"reserveflow-v1/dao"
 )
 
 // expiredJobs: işçilerin (worker goroutine'lerin) iş alacağı kanal (tepsi).
@@ -36,11 +35,7 @@ func InitWorkerPool(numWorkers int) {
 // Kanal kapanana kadar beklemede kalır (for range pattern).
 func processJob(workerID int, jobs <-chan uint) {
 	for resID := range jobs {
-		err := commons.DB.
-			Model(&models.Reservation{}).
-			Where("id = ? AND status = ?", resID, models.ReservationStatusHeld).
-			Update("status", models.ReservationStatusExpired).Error
-
+		err := dao.MarkReservationAsExpired(resID)
 		if err != nil {
 			log.Printf("[Worker-%d] HATA: Rezervasyon #%d güncellenemedi: %v\n", workerID, resID, err)
 		} else {
@@ -53,7 +48,6 @@ func processJob(workerID int, jobs <-chan uint) {
 // Süresi geçmiş ama hâlâ "held" durumundaki rezervasyonları bulur
 // ve ID'lerini expiredJobs kanalına gönderir.
 func dispatcher() {
-	// İlk çalışmada beklemeden hemen bir tarama yap
 	scanAndDispatch()
 
 	ticker := time.NewTicker(1 * time.Minute)
@@ -67,13 +61,7 @@ func dispatcher() {
 // scanAndDispatch: tek bir DB tarama turunu gerçekleştirir.
 // Pluck sadece ID sütununu çeker — büyük tablolarda RAM dostudur.
 func scanAndDispatch() {
-	var expiredIDs []uint
-
-	err := commons.DB.
-		Model(&models.Reservation{}).
-		Where("status = ? AND expires_at < ?", models.ReservationStatusHeld, time.Now()).
-		Pluck("id", &expiredIDs).Error
-
+	expiredIDs, err := dao.GetExpiredReservationIDs(time.Now())
 	if err != nil {
 		log.Printf("[Dispatcher] DB tarama hatası: %v\n", err)
 		return
@@ -86,8 +74,6 @@ func scanAndDispatch() {
 	log.Printf("[Dispatcher] %d adet süresi dolmuş rezervasyon bulundu, işçilere gönderiliyor...\n", len(expiredIDs))
 
 	for _, id := range expiredIDs {
-		// Kanal dolu ise bu satır bloke olur — kasıtlı olarak bırakıldı.
-		// Üretici (dispatcher) tüketicilerden (workers) hızlı olmamalı.
 		expiredJobs <- id
 	}
 }

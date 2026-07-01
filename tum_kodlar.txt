@@ -692,30 +692,6 @@ func HoldReservation(c *gin.Context) {
 		})
 		return
 	}
-
-	hasConflict, err := dao.HasActiveReservationConflict(resource.ID, startTime, endTime)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error": gin.H{
-				"code":    "CONFLICT_CHECK_ERROR",
-				"message": err.Error(),
-			},
-		})
-		return
-	}
-
-	if hasConflict {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"error": gin.H{
-				"code":    "RESERVATION_CONFLICT",
-				"message": "resource is already reserved or held for this time range",
-			},
-		})
-		return
-	}
-
 	reservation := models.Reservation{
 		UserID:     userID,
 		ResourceID: resource.ID,
@@ -724,8 +700,18 @@ func HoldReservation(c *gin.Context) {
 		Status:     models.ReservationStatusHeld,
 		ExpiresAt:  time.Now().Add(10 * time.Minute),
 	}
+	if err := dao.HoldReservationWithTx(&reservation); err != nil {
+		if err.Error() == "RESERVATION_CONFLICT" {
+			c.JSON(http.StatusConflict, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "RESERVATION_CONFLICT",
+					"message": "resource is already reserved or held for this time range",
+				},
+			})
+			return
+		}
 
-	if err := dao.CreateReservation(&reservation); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error": gin.H{
@@ -1431,7 +1417,7 @@ func AssignResourceAdmin(c *gin.Context) {
 	}
 
 	// Sadece "user" rolÃ¼ndekileri resource-admin'e yÃ¼kselt.
-	// "manager" ve "admin" rollerine dokunma.
+	// "manager" ve "super-admin" rollerine dokunma.
 	if user.Role.Name == models.UserRoleUser {
 		if err := dao.UpdateUserRole(user.ID, models.UserRoleResourceAdmin); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -1661,10 +1647,13 @@ func GetPermissionsByID(id uint) (*models.Permission, error) {
 package dao
 
 import (
+	"errors"
 	"time"
 
 	"reserveflow-v1/commons"
 	"reserveflow-v1/models"
+
+	"gorm.io/gorm"
 )
 
 func CreateReservation(reservation *models.Reservation) error {
@@ -1743,6 +1732,7 @@ func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*model
 
 	return &workingHour, nil
 }
+
 func HasActiveReservationConflictExceptID(reservationID uint, resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
 	var count int64
 
@@ -1765,6 +1755,55 @@ func HasActiveReservationConflictExceptID(reservationID uint, resourceID uint, s
 	}
 
 	return count > 0, nil
+}
+
+func GetExpiredReservationIDs(currentTime time.Time) ([]uint, error) {
+	var expiredIDs []uint
+	err := commons.DB.
+		Model(&models.Reservation{}).
+		Where("status = ? AND expires_at < ?", models.ReservationStatusHeld, currentTime).
+		Pluck("id", &expiredIDs).Error
+
+	return expiredIDs, err
+}
+
+func MarkReservationAsExpired(resID uint) error {
+	return commons.DB.
+		Model(&models.Reservation{}).
+		Where("id = ? AND status = ?", resID, models.ReservationStatusHeld).
+		Update("status", models.ReservationStatusExpired).Error
+}
+
+func HoldReservationWithTx(reservation *models.Reservation) error {
+	return commons.DB.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		now := time.Now()
+
+		err := tx.Model(&models.Reservation{}).
+			Where("resource_id = ?", reservation.ResourceID).
+			Where("start_time < ? AND end_time > ?", reservation.EndTime, reservation.StartTime).
+			Where(
+				"status = ? OR (status = ? AND expires_at > ?)",
+				models.ReservationStatusConfirmed,
+				models.ReservationStatusHeld,
+				now,
+			).
+			Count(&count).Error
+
+		if err != nil {
+			return err
+		}
+
+		if count > 0 {
+			return errors.New("RESERVATION_CONFLICT")
+		}
+
+		if err := tx.Create(reservation).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
 }
 package dao
 
@@ -2415,9 +2454,18 @@ func SeedRolesPermissions() {
 		}
 	}
 	adminPermissions := []models.Permission{
+		// RBAC yÃ¶netimi
 		{Method: "GET", Endpoint: "/admin/roles"},
 		{Method: "POST", Endpoint: "/admin/roles/permissions"},
 		{Method: "POST", Endpoint: "/admin/roles/:id/permissions"},
+		// Kaynak CRUD
+		{Method: "POST", Endpoint: "/admin/resources"},
+		{Method: "PATCH", Endpoint: "/admin/resources/:id"},
+		{Method: "DELETE", Endpoint: "/admin/resources/:id"},
+		// Resource Admin yÃ¶netimi
+		{Method: "GET", Endpoint: "/admin/resources/:id/admins"},
+		{Method: "POST", Endpoint: "/admin/resources/:id/admins"},
+		{Method: "DELETE", Endpoint: "/admin/resources/:id/admins/:userId"},
 	}
 	for i, perm := range adminPermissions {
 		var existingPerm models.Permission
@@ -2443,8 +2491,7 @@ import (
 	"log"
 	"time"
 
-	"reserveflow-v1/commons"
-	"reserveflow-v1/models"
+	"reserveflow-v1/dao"
 )
 
 // expiredJobs: iÅŸÃ§ilerin (worker goroutine'lerin) iÅŸ alacaÄŸÄ± kanal (tepsi).
@@ -2474,11 +2521,7 @@ func InitWorkerPool(numWorkers int) {
 // Kanal kapanana kadar beklemede kalÄ±r (for range pattern).
 func processJob(workerID int, jobs <-chan uint) {
 	for resID := range jobs {
-		err := commons.DB.
-			Model(&models.Reservation{}).
-			Where("id = ? AND status = ?", resID, models.ReservationStatusHeld).
-			Update("status", models.ReservationStatusExpired).Error
-
+		err := dao.MarkReservationAsExpired(resID)
 		if err != nil {
 			log.Printf("[Worker-%d] HATA: Rezervasyon #%d gÃ¼ncellenemedi: %v\n", workerID, resID, err)
 		} else {
@@ -2491,7 +2534,6 @@ func processJob(workerID int, jobs <-chan uint) {
 // SÃ¼resi geÃ§miÅŸ ama hÃ¢lÃ¢ "held" durumundaki rezervasyonlarÄ± bulur
 // ve ID'lerini expiredJobs kanalÄ±na gÃ¶nderir.
 func dispatcher() {
-	// Ä°lk Ã§alÄ±ÅŸmada beklemeden hemen bir tarama yap
 	scanAndDispatch()
 
 	ticker := time.NewTicker(1 * time.Minute)
@@ -2505,13 +2547,7 @@ func dispatcher() {
 // scanAndDispatch: tek bir DB tarama turunu gerÃ§ekleÅŸtirir.
 // Pluck sadece ID sÃ¼tununu Ã§eker â€” bÃ¼yÃ¼k tablolarda RAM dostudur.
 func scanAndDispatch() {
-	var expiredIDs []uint
-
-	err := commons.DB.
-		Model(&models.Reservation{}).
-		Where("status = ? AND expires_at < ?", models.ReservationStatusHeld, time.Now()).
-		Pluck("id", &expiredIDs).Error
-
+	expiredIDs, err := dao.GetExpiredReservationIDs(time.Now())
 	if err != nil {
 		log.Printf("[Dispatcher] DB tarama hatasÄ±: %v\n", err)
 		return
@@ -2524,8 +2560,6 @@ func scanAndDispatch() {
 	log.Printf("[Dispatcher] %d adet sÃ¼resi dolmuÅŸ rezervasyon bulundu, iÅŸÃ§ilere gÃ¶nderiliyor...\n", len(expiredIDs))
 
 	for _, id := range expiredIDs {
-		// Kanal dolu ise bu satÄ±r bloke olur â€” kasÄ±tlÄ± olarak bÄ±rakÄ±ldÄ±.
-		// Ãœretici (dispatcher) tÃ¼keticilerden (workers) hÄ±zlÄ± olmamalÄ±.
 		expiredJobs <- id
 	}
 }
