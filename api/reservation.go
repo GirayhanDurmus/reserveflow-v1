@@ -19,6 +19,7 @@ type HoldReservationRequest struct {
 	EndTime    string `json:"end_time"`
 }
 
+
 func HoldReservation(c *gin.Context) {
 	userID, ok := getCurrentUserID(c)
 	if !ok {
@@ -110,14 +111,16 @@ func HoldReservation(c *gin.Context) {
 		})
 		return
 	}
+
 	reservation := models.Reservation{
 		UserID:     userID,
 		ResourceID: resource.ID,
 		StartTime:  startTime,
 		EndTime:    endTime,
 		Status:     models.ReservationStatusHeld,
-		ExpiresAt:  time.Now().Add(10 * time.Minute),
+		ExpiresAt:  time.Now().Add(1 * time.Minute),
 	}
+
 	if err := dao.HoldReservationWithTx(&reservation); err != nil {
 		if err.Error() == "RESERVATION_CONFLICT" {
 			c.JSON(http.StatusConflict, gin.H{
@@ -129,7 +132,6 @@ func HoldReservation(c *gin.Context) {
 			})
 			return
 		}
-
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error": gin.H{
@@ -157,6 +159,92 @@ func HoldReservation(c *gin.Context) {
 		"data":    createdReservation,
 	})
 }
+
+// BatchHoldReservation aynı anda birden fazla rezervasyon için hold oluşturur.
+func BatchHoldReservation(c *gin.Context) {
+	userID, ok := getCurrentUserID(c)
+	if !ok {
+		return
+	}
+
+	var reqs []HoldReservationRequest
+	if err := c.BindJSON(&reqs); err != nil {
+		return
+	}
+
+	if len(reqs) == 0 || len(reqs) > 50 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   gin.H{"code": "INVALID_BATCH_SIZE", "message": "1 ile 50 arasında rezervasyon gönderin"},
+		})
+		return
+	}
+
+	results := make([]gin.H, 0, len(reqs))
+
+	for i, req := range reqs {
+		startTime, err := time.Parse(time.RFC3339, req.StartTime)
+		if err != nil {
+			results = append(results, gin.H{"index": i, "success": false, "error": "INVALID_START_TIME"})
+			continue
+		}
+
+		endTime, err := time.Parse(time.RFC3339, req.EndTime)
+		if err != nil {
+			results = append(results, gin.H{"index": i, "success": false, "error": "INVALID_END_TIME"})
+			continue
+		}
+
+		if !endTime.After(startTime) {
+			results = append(results, gin.H{"index": i, "success": false, "error": "INVALID_TIME_RANGE"})
+			continue
+		}
+
+		resource, err := dao.GetResourceByID(req.ResourceID)
+		if err != nil {
+			results = append(results, gin.H{"index": i, "success": false, "error": "RESOURCE_NOT_FOUND"})
+			continue
+		}
+
+		if !resource.IsActive {
+			results = append(results, gin.H{"index": i, "success": false, "error": "RESOURCE_INACTIVE"})
+			continue
+		}
+
+		withinWorkingHours, err := isWithinResourceWorkingHours(resource.ID, startTime, endTime)
+		if err != nil || !withinWorkingHours {
+			results = append(results, gin.H{"index": i, "success": false, "error": "OUTSIDE_WORKING_HOURS"})
+			continue
+		}
+
+		reservation := models.Reservation{
+			UserID:     userID,
+			ResourceID: resource.ID,
+			StartTime:  startTime,
+			EndTime:    endTime,
+			Status:     models.ReservationStatusHeld,
+			ExpiresAt:  time.Now().Add(1 * time.Minute),
+		}
+
+		if err := dao.HoldReservationWithTx(&reservation); err != nil {
+			errCode := "RESERVATION_HOLD_ERROR"
+			if err.Error() == "RESERVATION_CONFLICT" {
+				errCode = "RESERVATION_CONFLICT"
+			}
+			results = append(results, gin.H{"index": i, "success": false, "error": errCode})
+			continue
+		}
+
+		results = append(results, gin.H{"index": i, "success": true, "id": reservation.ID})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    results,
+	})
+}
+
+
 
 func GetMyReservations(c *gin.Context) {
 	userID, ok := getCurrentUserID(c)
@@ -502,8 +590,8 @@ func AddReservationURLs(r *gin.RouterGroup) {
 	reservation := r.Group("/reservation")
 	reservation.Use(middleware.AuthRequired())
 	reservation.POST("/hold", HoldReservation)
+	reservation.POST("/batch-hold", BatchHoldReservation)
 	reservation.GET("/my", GetMyReservations)
 	reservation.POST("/:id/confirm", ConfirmReservation)
 	reservation.POST("/:id/cancel", CancelReservation)
-
 }

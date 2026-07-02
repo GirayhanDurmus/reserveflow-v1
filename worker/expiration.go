@@ -5,37 +5,34 @@ import (
 	"log"
 	"time"
 
-	"reserveflow-v1/dao"
+	"reserveflow-v1/service"
 )
 
-// expiredJobs: işçilerin (worker goroutine'lerin) iş alacağı kanal (tepsi).
-// Buffered Channel — aynı anda 100 rezervasyon ID'si bekleyebilir, bloke olmaz.
+var resService = service.NewReservationService()
+
+// expiredJobs: işçi goroutine'lerin iş aldığı kanal (max 100 ID tamponlu).
 var expiredJobs chan uint
 
-// InitWorkerPool sunucu başlarken bir kez çağrılır.
-// numWorkers: kaç adet paralel işçi goroutine başlatılacağı.
+// InitWorkerPool sunucu başlarken çağrılır; n adet işçi + dispatcher başlatır.
 func InitWorkerPool(numWorkers int) {
 	expiredJobs = make(chan uint, 100)
 
 	log.Printf("[WorkerPool] %d işçi başlatılıyor...\n", numWorkers)
 
-	// Her işçiyi ayrı bir goroutine olarak başlat
 	for i := 1; i <= numWorkers; i++ {
 		go processJob(i, expiredJobs)
 	}
 
-	// Şefi (dispatcher) başlat — periyodik DB taraması yapar
-	go dispatcher()
+	// Her 1 dakikada bir otomatik tarama yapacak dispatcher'ı başlatıyoruz
+	go startDispatcher()
 
 	log.Println("[WorkerPool] Sistem hazır. Süresi dolan rezervasyonlar izleniyor.")
 }
 
-// processJob: Her işçinin döngüsü.
-// Kanaldan bir ID geldiğinde o rezervasyonu "expired" yapar.
-// Kanal kapanana kadar beklemede kalır (for range pattern).
+// processJob kanaldan gelen rezervasyon ID'lerini "expired" olarak işler.
 func processJob(workerID int, jobs <-chan uint) {
 	for resID := range jobs {
-		err := dao.MarkReservationAsExpired(resID)
+		err := resService.ExpireReservation(resID)
 		if err != nil {
 			log.Printf("[Worker-%d] HATA: Rezervasyon #%d güncellenemedi: %v\n", workerID, resID, err)
 		} else {
@@ -44,36 +41,36 @@ func processJob(workerID int, jobs <-chan uint) {
 	}
 }
 
-// dispatcher: Periyodik olarak (her 1 dakika) DB'yi tarar.
-// Süresi geçmiş ama hâlâ "held" durumundaki rezervasyonları bulur
-// ve ID'lerini expiredJobs kanalına gönderir.
-func dispatcher() {
-	scanAndDispatch()
-
+// startDispatcher her 1 dakikada bir veritabanını tarar.
+func startDispatcher() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		scanAndDispatch()
+		_, err := runExpirationCheck()
+		if err != nil {
+			log.Printf("[Dispatcher] Hata oluştu: %v\n", err)
+		}
 	}
 }
 
-// scanAndDispatch: tek bir DB tarama turunu gerçekleştirir.
-// Pluck sadece ID sütununu çeker — büyük tablolarda RAM dostudur.
-func scanAndDispatch() {
-	expiredIDs, err := dao.GetExpiredReservationIDs(time.Now())
+// runExpirationCheck süresi dolmuş rezervasyonları bulup işçilere gönderir.
+func runExpirationCheck() (int, error) {
+	expiredIDs, err := resService.GetExpiredReservationIDs(time.Now())
 	if err != nil {
-		log.Printf("[Dispatcher] DB tarama hatası: %v\n", err)
-		return
+		log.Printf("[Trigger] DB tarama hatası: %v\n", err)
+		return 0, err
 	}
 
 	if len(expiredIDs) == 0 {
-		return
+		return 0, nil
 	}
 
-	log.Printf("[Dispatcher] %d adet süresi dolmuş rezervasyon bulundu, işçilere gönderiliyor...\n", len(expiredIDs))
+	log.Printf("[Trigger] %d adet süresi dolmuş rezervasyon bulundu, işçilere gönderiliyor...\n", len(expiredIDs))
 
 	for _, id := range expiredIDs {
 		expiredJobs <- id
 	}
+
+	return len(expiredIDs), nil
 }
