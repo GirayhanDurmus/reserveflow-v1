@@ -249,37 +249,18 @@ func ConfirmReservation(c *gin.Context) {
 		return
 	}
 
-	hasConflict, err := dao.HasActiveReservationConflictExceptID(
-		reservation.ID,
-		reservation.ResourceID,
-		reservation.StartTime,
-		reservation.EndTime,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error": gin.H{
-				"code":    "CONFLICT_CHECK_ERROR",
-				"message": err.Error(),
-			},
-		})
-		return
-	}
+	if err := dao.ConfirmReservationWithTx(reservation); err != nil {
+		if err.Error() == "RESERVATION_CONFLICT" {
+			c.JSON(http.StatusConflict, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "RESERVATION_CONFLICT",
+					"message": "resource is already reserved or held for this time range",
+				},
+			})
+			return
+		}
 
-	if hasConflict {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"success": false,
-			"error": gin.H{
-				"code":    "RESERVATION_CONFLICT",
-				"message": "resource is already reserved or held for this time range",
-			},
-		})
-		return
-	}
-
-	reservation.Status = models.ReservationStatusConfirmed
-
-	if err := dao.UpdateReservation(reservation); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
 			"error": gin.H{

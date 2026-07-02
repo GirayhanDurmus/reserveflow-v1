@@ -87,29 +87,7 @@ func GetWorkingHourByResourceIDAndDay(resourceID uint, dayOfWeek string) (*model
 	return &workingHour, nil
 }
 
-func HasActiveReservationConflictExceptID(reservationID uint, resourceID uint, startTime time.Time, endTime time.Time) (bool, error) {
-	var count int64
 
-	now := time.Now()
-
-	err := commons.DB.Model(&models.Reservation{}).
-		Where("id <> ?", reservationID).
-		Where("resource_id = ?", resourceID).
-		Where("start_time < ? AND end_time > ?", endTime, startTime).
-		Where(
-			"status = ? OR (status = ? AND expires_at > ?)",
-			models.ReservationStatusConfirmed,
-			models.ReservationStatusHeld,
-			now,
-		).
-		Count(&count).Error
-
-	if err != nil {
-		return false, err
-	}
-
-	return count > 0, nil
-}
 
 func GetExpiredReservationIDs(currentTime time.Time) ([]uint, error) {
 	var expiredIDs []uint
@@ -134,7 +112,7 @@ func HoldReservationWithTx(reservation *models.Reservation) error {
 		now := time.Now()
 
 		err := tx.Model(&models.Reservation{}).
-			Where("resource_id = ?", reservation.ResourceID).
+			Where("resource_id = ? AND id != ?", reservation.ResourceID, reservation.ID).
 			Where("start_time < ? AND end_time > ?", reservation.EndTime, reservation.StartTime).
 			Where(
 				"status = ? OR (status = ? AND expires_at > ?)",
@@ -153,6 +131,38 @@ func HoldReservationWithTx(reservation *models.Reservation) error {
 		}
 
 		if err := tx.Create(reservation).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+func ConfirmReservationWithTx(reservation *models.Reservation) error {
+	return commons.DB.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		now := time.Now()
+
+		err := tx.Model(&models.Reservation{}).
+			Where("resource_id = ? AND id != ?", reservation.ResourceID, reservation.ID).
+			Where("start_time < ? AND end_time > ?", reservation.EndTime, reservation.StartTime).
+			Where(
+				"status = ? OR (status = ? AND expires_at > ?)",
+				models.ReservationStatusConfirmed,
+				models.ReservationStatusHeld,
+				now,
+			).
+			Count(&count).Error
+
+		if err != nil {
+			return err
+		}
+
+		if count > 0 {
+			return errors.New("RESERVATION_CONFLICT")
+		}
+
+		reservation.Status = models.ReservationStatusConfirmed
+		if err := tx.Save(reservation).Error; err != nil {
 			return err
 		}
 
